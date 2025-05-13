@@ -24,7 +24,7 @@ inference:
 
   # Path to model weights.
   # weights_path: ./ckpt/foldflow-sfm.pth # For FoldFlow-1 with stochastic flow matcher.
-  weights_path: ./ckpt/ff2_base.pth
+  weights_path: ./models/ff2_base.pth
 
   flow:
     # Number of steps.

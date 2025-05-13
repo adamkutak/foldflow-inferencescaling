@@ -188,7 +188,8 @@ slurm-*.out
 
 # chekpoint, and logs.
 ckpt/
-*.pth
+# *.pth
+*.pt
 *.sw?
 wandb/
 !runner/config/wandb/
