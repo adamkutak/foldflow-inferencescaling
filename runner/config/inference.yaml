@@ -13,7 +13,7 @@ flow_matcher:
 
 inference:
   name: null
-  gpu_id: 0  # CUDA GPU to use
+  gpu_id: 1  # CUDA GPU to use
   seed: 123
   full_ckpt_dir: ./ckpt/baseline/
 
