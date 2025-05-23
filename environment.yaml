@@ -6,10 +6,10 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.9.15
+  - python>=3.8,<3.11
   - pytorch<2
   - libstdcxx-ng
-  # - mdtraj=1.9.7
+  - mdtraj
   - pip
   # - pdbfixer=1.8.1
   - pip:
@@ -38,5 +38,4 @@ dependencies:
       - OpenMM
       - pydantic
       - biotite
-      - mdtraj
       - -e .
