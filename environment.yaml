@@ -1,5 +1,8 @@
 name: foldflow-env
 channels:
+  - pytorch
+  - nvidia
+  - anaconda
   - conda-forge
   - defaults
 dependencies:
