@@ -9,7 +9,7 @@ dependencies:
   - python=3.9.15
   - pytorch<2
   - libstdcxx-ng
-  - mdtraj=1.9.7
+  # - mdtraj=1.9.7
   - pip
   # - pdbfixer=1.8.1
   - pip:
@@ -38,4 +38,5 @@ dependencies:
       - OpenMM
       - pydantic
       - biotite
+      - mdtraj
       - -e .
