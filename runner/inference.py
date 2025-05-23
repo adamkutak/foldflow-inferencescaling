@@ -183,16 +183,45 @@ class Sampler:
             self._sample_conf.max_length + 1,
             self._sample_conf.length_step,
         )
+
+        # Check if we should use Best-of-N sampling
+        use_best_of_n = (
+            hasattr(self._sample_conf, "best_of_n") and self._sample_conf.best_of_n > 1
+        )
+
         for sample_length in all_sample_lengths:
             length_dir = os.path.join(self._output_dir, f"length_{sample_length}")
             os.makedirs(length_dir, exist_ok=True)
             self._log.info(f"Sampling length {sample_length}: {length_dir}")
+
             for sample_i in range(self._sample_conf.samples_per_length):
                 sample_dir = os.path.join(length_dir, f"sample_{sample_i}")
                 if os.path.isdir(sample_dir):
                     continue
                 os.makedirs(sample_dir, exist_ok=True)
-                sample_output = self.sample(sample_length)
+
+                if use_best_of_n:
+                    # Use Best-of-N sampling
+                    self._log.info(
+                        f"Using Best-of-N sampling with N={self._sample_conf.best_of_n}"
+                    )
+                    best_of_n_result = self.best_of_n_sample(
+                        sample_length,
+                        self._sample_conf.best_of_n,
+                        temp_dir=os.path.join(sample_dir, "best_of_n_candidates"),
+                    )
+                    sample_output = best_of_n_result["sample"]
+
+                    # Save the best TM-score for reference
+                    with open(
+                        os.path.join(sample_dir, "best_of_n_tm_score.txt"), "w"
+                    ) as f:
+                        f.write(f"Best TM-score: {best_of_n_result['tm_score']:.4f}\n")
+                        f.write(f"From {self._sample_conf.best_of_n} candidates\n")
+                else:
+                    # Use standard sampling
+                    sample_output = self.sample(sample_length)
+
                 traj_paths = self.save_traj(
                     sample_output["prot_traj"],
                     sample_output["rigid_0_traj"],
@@ -207,7 +236,9 @@ class Sampler:
                 shutil.copy(
                     pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
                 )
-                _ = self.run_self_consistency(sc_output_dir, pdb_path, motif_mask=None)
+                sc_results = self.run_self_consistency(
+                    sc_output_dir, pdb_path, motif_mask=None
+                )
                 self._log.info(f"Done sample {sample_i}: {pdb_path}")
 
     def save_traj(
@@ -278,6 +309,7 @@ class Sampler:
             Writes ProteinMPNN outputs to decoy_pdb_dir/seqs
             Writes ESMFold outputs to decoy_pdb_dir/esmf
             Writes results in decoy_pdb_dir/sc_results.csv
+            Returns the pd.DataFrame with metrics
         """
 
         # Run PorteinMPNN
@@ -378,6 +410,9 @@ class Sampler:
         mpnn_results = pd.DataFrame(mpnn_results)
         mpnn_results.to_csv(csv_path)
 
+        # Return the results dataframe
+        return mpnn_results
+
     def run_folding(self, sequence, save_path):
         """Run ESMFold on sequence."""
         with torch.no_grad():
@@ -434,6 +469,86 @@ class Sampler:
             context=context,
         )
         return tree.map_structure(lambda x: x[:, 0], sample_out)
+
+    def best_of_n_sample(
+        self,
+        sample_length: int,
+        n_samples: int,
+        context: Optional[torch.Tensor] = None,
+        temp_dir: Optional[str] = None,
+    ):
+        """Sample based on length with Best-of-N strategy.
+
+        Generates N samples and selects the best one based on TM-score.
+
+        Args:
+            sample_length: length to sample
+            n_samples: number of samples to generate
+            context: Optional context for conditional generation
+            temp_dir: Optional temp directory for storing intermediate samples
+                      If None, a temporary directory will be created
+
+        Returns:
+            The best sample based on TM-score and its metrics
+        """
+        self._log.info(f"Running Best-of-N sampling with N={n_samples}")
+
+        # Create temporary directory if not provided
+        if temp_dir is None:
+            temp_dir = os.path.join(self._output_dir, f"best_of_{n_samples}_temp")
+            os.makedirs(temp_dir, exist_ok=True)
+
+        best_sample = None
+        best_tm_score = -1.0
+        best_metrics = None
+
+        for i in range(n_samples):
+            self._log.info(f"Generating sample {i+1}/{n_samples}")
+            sample_output = self.sample(sample_length, context)
+
+            # Save the trajectory temporarily
+            sample_dir = os.path.join(temp_dir, f"sample_{i}")
+            os.makedirs(sample_dir, exist_ok=True)
+            traj_paths = self.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=sample_dir,
+            )
+
+            # Run ProteinMPNN and ESMFold to evaluate
+            pdb_path = traj_paths["sample_path"]
+            sc_output_dir = os.path.join(sample_dir, "self_consistency")
+            os.makedirs(sc_output_dir, exist_ok=True)
+            shutil.copy(
+                pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
+            )
+
+            # Evaluate the sample
+            sc_results = self.run_self_consistency(
+                sc_output_dir, pdb_path, motif_mask=None
+            )
+
+            # Get the average TM-score from all sequences
+            avg_tm_score = sc_results["tm_score"].mean()
+            self._log.info(f"Sample {i+1} TM-score: {avg_tm_score:.4f}")
+
+            # Update best sample if this one is better
+            if avg_tm_score > best_tm_score:
+                best_tm_score = avg_tm_score
+                best_sample = sample_output
+                best_metrics = sc_results
+                self._log.info(f"New best sample found: TM-score = {best_tm_score:.4f}")
+
+        self._log.info(
+            f"Best-of-{n_samples} sampling complete. Best TM-score: {best_tm_score:.4f}"
+        )
+
+        return {
+            "sample": best_sample,
+            "tm_score": best_tm_score,
+            "metrics": best_metrics,
+        }
 
 
 @hydra.main(version_base=None, config_path="config/", config_name="inference")
