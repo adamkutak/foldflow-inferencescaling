@@ -1,64 +1,146 @@
-# Best-of-N Protein Design Sampling
+# Advanced Protein Design Inference Methods
 
-This document explains how to use the Best-of-N sampling approach for improved protein design in FoldFlow.
+This document explains how to use the advanced inference methods for improved protein design in FoldFlow.
 
 ## Overview
 
-Best-of-N sampling is a technique that generates multiple protein design candidates and selects the best one based on a quality metric (TM-score). This approach significantly improves the quality of the final designs by exploring a larger portion of the design space.
+FoldFlow now supports multiple inference strategies that can significantly improve the quality of generated protein designs:
 
-## How It Works
+1. **Standard Sampling**: Basic single-sample generation
+2. **Best-of-N Sampling**: Generate N candidates and select the best one
+3. **SDE Path Exploration**: Use stochastic differential equations with Euler-Maruyama sampling for path exploration
+4. **Divergence-Free ODE**: Use divergence-free vector fields for deterministic path exploration
 
-1. The system generates N independent samples using the trained flow matching model
-2. Each sample is evaluated for quality using the self-consistency pipeline:
-   - ProteinMPNN predicts sequences that would fold into the structure
-   - ESMFold folds these sequences back into structures
-   - TM-scores are calculated between the original and refolded structures
-3. The sample with the highest average TM-score is selected as the final output
+## Inference Methods
 
-## Usage
+### 1. Standard Sampling
+The default method that generates a single sample using the trained flow matching model.
 
-To use Best-of-N sampling, you need to set the `best_of_n` parameter in the configuration file:
+### 2. Best-of-N Sampling
+Generates multiple protein design candidates and selects the best one based on a quality metric (TM-score or RMSD).
+
+**How it works:**
+1. Generate N independent samples using the trained flow matching model
+2. Evaluate each sample using the self-consistency pipeline
+3. Select the sample with the highest score
+
+### 3. SDE Path Exploration
+Uses stochastic differential equations with branching to explore multiple paths during generation.
+
+**How it works:**
+1. Start with standard flow matching until a specified branching time
+2. At each branching step, create multiple branches by adding different noise samples
+3. Simulate each branch to completion deterministically
+4. Evaluate and select the best branches to continue
+5. Repeat until generation is complete
+
+### 4. Divergence-Free ODE Path Exploration
+Similar to SDE but uses divergence-free vector fields instead of noise for exploration.
+
+**How it works:**
+1. Start with standard flow matching until branching time
+2. Add divergence-free vector fields to create different exploration paths
+3. Simulate branches deterministically and select the best ones
+4. Continue until generation is complete
+
+## Configuration
+
+### Basic Configuration
+
+Edit `runner/config/inference.yaml`:
 
 ```yaml
-# In runner/config/inference.yaml
 inference:
   samples:
-    # ... other parameters ...
+    # Choose inference method
+    inference_method: "best_of_n"  # Options: "standard", "best_of_n", "sde_path_exploration", "divergence_free_ode"
     
-    # Number of candidates to generate for Best-of-N sampling
-    best_of_n: 10  # Set to 1 to disable
+    # Method-specific configuration
+    method_config:
+      # Best-of-N settings
+      n_samples: 5
+      selector: "tm_score"  # "tm_score" or "rmsd"
 ```
 
-The recommended range for `best_of_n` is between 5 and 20, with higher values providing better quality at the cost of increased computational time.
+### SDE Path Exploration Configuration
 
-## Running Inference
+```yaml
+inference:
+  samples:
+    inference_method: "sde_path_exploration"
+    method_config:
+      num_branches: 4      # Number of branches per step
+      num_keep: 2          # Number of branches to keep
+      noise_scale: 0.05    # Scale of noise for SDE
+      selector: "tm_score" # Scoring function
+      branch_start_time: 0.0  # When to start branching (0.0 to 1.0)
+```
 
-Run inference as usual with your Best-of-N configuration:
+### Divergence-Free ODE Configuration
+
+```yaml
+inference:
+  samples:
+    inference_method: "divergence_free_ode"
+    method_config:
+      num_branches: 4      # Number of branches per step
+      num_keep: 2          # Number of branches to keep
+      lambda_div: 0.2      # Scale factor for divergence-free field
+      selector: "tm_score" # Scoring function
+      branch_start_time: 0.0  # When to start branching
+```
+
+## Pre-configured Files
+
+Use the provided configuration files for quick setup:
 
 ```bash
+# Best-of-N sampling (default)
 python runner/inference.py
+
+# SDE path exploration
+python runner/inference.py --config-name=inference_sde
+
+# Divergence-free ODE exploration
+python runner/inference.py --config-name=inference_divfree
 ```
+
+## Scoring Functions
+
+All advanced methods support different scoring functions:
+
+- **tm_score**: Template Modeling score (higher is better)
+- **rmsd**: Root Mean Square Deviation (lower is better, automatically negated)
 
 ## Output
 
 For each sample, you'll find:
 
 - The final selected protein design
-- A `best_of_n_tm_score.txt` file containing the best TM-score and number of candidates
-- A `best_of_n_candidates` directory with all candidate designs and their evaluations
+- An `inference_score.txt` file containing the score and method used
+- Method-specific directories with candidate evaluations (for branching methods)
 
-## Implementation Details
+## Performance Considerations
 
-The Best-of-N sampling is implemented in the `best_of_n_sample` method in the `Sampler` class in `runner/inference.py`. This method:
-
-1. Generates N independent samples
-2. Evaluates each sample using the `run_self_consistency` method
-3. Selects the sample with the highest average TM-score
-4. Returns the best sample along with its metrics
+- **Best-of-N**: Computational cost scales linearly with N
+- **SDE/Divergence-Free**: Cost scales with `num_branches` and number of branching steps
+- **Branching methods**: More expensive but can find higher quality designs
+- **Scoring**: Each evaluation requires ProteinMPNN + ESMFold, which is computationally intensive
 
 ## Tips
 
-- Increase `best_of_n` for higher quality designs, especially for challenging targets
-- For quick exploration, use a smaller value (e.g., 5)
-- For final designs, consider using a larger value (e.g., 20)
-- The computational cost scales linearly with `best_of_n` 
+- Start with Best-of-N (N=5) for a good balance of quality and speed
+- Use SDE path exploration for challenging targets requiring more exploration
+- Increase `num_branches` for better quality at higher computational cost
+- Set `branch_start_time > 0.0` to reduce computational cost while maintaining quality
+- Use `tm_score` for general quality assessment
+- Use `rmsd` when structural accuracy is most important
+
+## Implementation Details
+
+The inference methods are implemented in `runner/inference_methods.py` with a modular design:
+
+- Each method inherits from `InferenceMethod` base class
+- Scoring functions are standardized and reusable
+- Configuration is handled through the YAML system
+- Legacy Best-of-N configuration is still supported for backward compatibility 
