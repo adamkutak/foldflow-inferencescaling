@@ -1,1 +1,2 @@
-__version__ = "0.1.0"
+"""Copyright (c) Dreamfold."""
+__version__ = "0.1"

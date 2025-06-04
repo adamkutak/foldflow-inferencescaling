@@ -46,5 +46,28 @@ inference:
     # gap between lengths to sample. i.e. this script will sample all lengths
     # in range(min_length, max_length, length_step)
     length_step: 50
-    # Number of candidates to generate for Best-of-N sampling (set to 1 to disable)
-    best_of_n: 4
+    
+    # Inference method configuration
+    # Options: "standard", "best_of_n", "sde_path_exploration", "divergence_free_ode"
+    inference_method: "best_of_n"
+    
+    # Method-specific configuration
+    method_config:
+      # Best-of-N configuration
+      n_samples: 4  # Number of samples to generate and select best from
+      selector: "tm_score"  # Scoring function: "tm_score" or "rmsd"
+      
+      # SDE Path Exploration configuration (when using sde_path_exploration)
+      # num_branches: 4  # Number of branches per step
+      # num_keep: 2  # Number of branches to keep
+      # noise_scale: 0.05  # Scale of noise for SDE
+      # branch_start_time: 0.0  # When to start branching (0.0 to 1.0)
+      
+      # Divergence-free ODE configuration (when using divergence_free_ode)
+      # num_branches: 4
+      # num_keep: 2
+      # lambda_div: 0.2  # Scale factor for divergence-free field
+      # branch_start_time: 0.0
+    
+    # Legacy configuration (for backward compatibility)
+    # best_of_n: 1  # Set to >1 to enable best-of-n (overrides inference_method)
