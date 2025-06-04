@@ -51,9 +51,32 @@ class ExperimentRunner:
 
     def setup_config(self):
         """Setup configuration for experiments."""
-        # Load base configuration
-        config_path = "runner/config/inference.yaml"
-        self.base_conf = OmegaConf.load(config_path)
+        # Load multiple configuration files and merge them properly
+        base_config_path = "runner/config/base.yaml"
+        model_config_path = "runner/config/model/ff2.yaml"
+        inference_config_path = "runner/config/inference.yaml"
+        flow_matcher_config_path = "runner/config/flow_matcher/default.yaml"
+        data_config_path = "runner/config/data/default.yaml"
+
+        # Load each config
+        base_conf = OmegaConf.load(base_config_path)
+        model_conf = OmegaConf.load(model_config_path)
+        inference_conf = OmegaConf.load(inference_config_path)
+        flow_matcher_conf = OmegaConf.load(flow_matcher_config_path)
+        data_conf = OmegaConf.load(data_config_path)
+
+        # Create merged configuration
+        self.base_conf = OmegaConf.create({})
+
+        # Merge configurations in the right order
+        self.base_conf = OmegaConf.merge(
+            self.base_conf,
+            base_conf,
+            {"model": model_conf},
+            {"flow_matcher": flow_matcher_conf},
+            {"data": data_conf},
+            inference_conf,
+        )
 
         # Override with experiment parameters
         self.base_conf.inference.samples.samples_per_length = (
@@ -355,25 +378,6 @@ class ExperimentRunner:
         print(f"Improvement: {improvement:.2f}% over baseline")
         print(f"Time per sample: {best_result['time_per_sample']:.2f}s")
         print()
-
-
-def create_sampler(method_config: Dict[str, Any]) -> Sampler:
-    """Create a sampler with specific method configuration."""
-    # Load base configuration
-    config_path = "runner/config/inference.yaml"
-    conf = OmegaConf.load(config_path)
-
-    # Update method configuration
-    conf.inference.samples.inference_method = method_config["method"]
-    conf.inference.samples.method_config = method_config.get("config", {})
-
-    # Set minimal sampling parameters for experiments
-    conf.inference.samples.samples_per_length = 1
-    conf.inference.samples.min_length = 50  # Small for testing
-    conf.inference.samples.max_length = 50
-    conf.inference.samples.length_step = 1
-
-    return Sampler(conf)
 
 
 def main():
