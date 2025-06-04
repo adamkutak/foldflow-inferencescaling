@@ -30,6 +30,7 @@ from foldflow.models.ff2flow.flow_model import FF2Model
 from foldflow.models.ff2flow.ff2_dependencies import FF2Dependencies
 
 from runner import train
+from runner.inference_methods import get_inference_method
 
 CA_IDX = residue_constants.atom_order["CA"]
 
@@ -135,6 +136,23 @@ class Sampler:
         self._folding_model = esm.pretrained.esmfold_v1().eval()
         self._folding_model = self._folding_model.to(self.device)
 
+        # Initialize inference method
+        self._setup_inference_method()
+
+    def _setup_inference_method(self):
+        """Setup the inference method based on configuration."""
+        # Get inference method configuration
+        method_name = getattr(self._sample_conf, "inference_method", "standard")
+        method_config = getattr(self._sample_conf, "method_config", {})
+
+        # Handle legacy best_of_n configuration
+        if hasattr(self._sample_conf, "best_of_n") and self._sample_conf.best_of_n > 1:
+            method_name = "best_of_n"
+            method_config = {"n_samples": self._sample_conf.best_of_n}
+
+        self._log.info(f"Using inference method: {method_name}")
+        self.inference_method = get_inference_method(method_name, self, method_config)
+
     def _load_ckpt_ff1(self, weights_pkl, conf_overrides):
         """Loads in model checkpoint."""
         self._log.info(f"Loading weights from {self._weights_path}")
@@ -183,16 +201,36 @@ class Sampler:
             self._sample_conf.max_length + 1,
             self._sample_conf.length_step,
         )
+
         for sample_length in all_sample_lengths:
             length_dir = os.path.join(self._output_dir, f"length_{sample_length}")
             os.makedirs(length_dir, exist_ok=True)
             self._log.info(f"Sampling length {sample_length}: {length_dir}")
+
             for sample_i in range(self._sample_conf.samples_per_length):
                 sample_dir = os.path.join(length_dir, f"sample_{sample_i}")
                 if os.path.isdir(sample_dir):
                     continue
                 os.makedirs(sample_dir, exist_ok=True)
-                sample_output = self.sample(sample_length)
+
+                # Use the configured inference method
+                sample_result = self.inference_method.sample(sample_length)
+
+                # Handle different return formats from inference methods
+                if isinstance(sample_result, dict) and "sample" in sample_result:
+                    sample_output = sample_result["sample"]
+                    # Save method-specific information
+                    if "score" in sample_result:
+                        with open(
+                            os.path.join(sample_dir, "inference_score.txt"), "w"
+                        ) as f:
+                            f.write(f"Score: {sample_result['score']:.4f}\n")
+                            f.write(
+                                f"Method: {sample_result.get('method', 'unknown')}\n"
+                            )
+                else:
+                    sample_output = sample_result
+
                 traj_paths = self.save_traj(
                     sample_output["prot_traj"],
                     sample_output["rigid_0_traj"],
@@ -207,7 +245,9 @@ class Sampler:
                 shutil.copy(
                     pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
                 )
-                _ = self.run_self_consistency(sc_output_dir, pdb_path, motif_mask=None)
+                sc_results = self.run_self_consistency(
+                    sc_output_dir, pdb_path, motif_mask=None
+                )
                 self._log.info(f"Done sample {sample_i}: {pdb_path}")
 
     def save_traj(
@@ -278,6 +318,7 @@ class Sampler:
             Writes ProteinMPNN outputs to decoy_pdb_dir/seqs
             Writes ESMFold outputs to decoy_pdb_dir/esmf
             Writes results in decoy_pdb_dir/sc_results.csv
+            Returns the pd.DataFrame with metrics
         """
 
         # Run PorteinMPNN
@@ -378,6 +419,9 @@ class Sampler:
         mpnn_results = pd.DataFrame(mpnn_results)
         mpnn_results.to_csv(csv_path)
 
+        # Return the results dataframe
+        return mpnn_results
+
     def run_folding(self, sequence, save_path):
         """Run ESMFold on sequence."""
         with torch.no_grad():
@@ -387,8 +431,8 @@ class Sampler:
             f.write(output)
         return output
 
-    def sample(self, sample_length: int, context: Optional[torch.Tensor] = None):
-        """Sample based on length.
+    def _base_sample(self, sample_length: int, context: Optional[torch.Tensor] = None):
+        """Base sampling method used by inference methods.
 
         Args:
             sample_length: length to sample
@@ -434,6 +478,25 @@ class Sampler:
             context=context,
         )
         return tree.map_structure(lambda x: x[:, 0], sample_out)
+
+    # Legacy methods for backward compatibility
+    def sample(self, sample_length: int, context: Optional[torch.Tensor] = None):
+        """Legacy sample method - now uses _base_sample."""
+        return self._base_sample(sample_length, context)
+
+    def best_of_n_sample(
+        self,
+        sample_length: int,
+        n_samples: int,
+        context: Optional[torch.Tensor] = None,
+        temp_dir: Optional[str] = None,
+    ):
+        """Legacy best_of_n_sample method."""
+        # Use the new inference method system
+        best_of_n_method = get_inference_method(
+            "best_of_n", self, {"n_samples": n_samples, "temp_dir": temp_dir}
+        )
+        return best_of_n_method.sample(sample_length, context)
 
 
 @hydra.main(version_base=None, config_path="config/", config_name="inference")

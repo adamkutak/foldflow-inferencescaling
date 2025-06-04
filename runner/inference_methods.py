@@ -1,0 +1,784 @@
+"""
+Inference methods for protein design sampling.
+
+This module contains various inference strategies including:
+- Standard sampling
+- Best-of-N sampling
+- SDE path exploration with Euler-Maruyama
+- Divergence-free ODE path exploration
+"""
+
+import logging
+import os
+import shutil
+import numpy as np
+import torch
+import tree
+from typing import Optional, Dict, Any, Callable
+from abc import ABC, abstractmethod
+
+from foldflow.data import utils as du
+from foldflow.data import residue_constants
+from openfold.utils import rigid_utils as ru
+from tools.analysis import metrics
+from runner.divergence_free_utils import apply_divergence_free_step
+
+
+class InferenceMethod(ABC):
+    """Base class for inference methods."""
+
+    def __init__(self, sampler, config: Dict[str, Any]):
+        self.sampler = sampler
+        self.config = config
+        self._log = logging.getLogger(__name__)
+
+    @abstractmethod
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate a sample using this inference method."""
+        pass
+
+    def get_score_function(self, selector: str = "tm_score") -> Callable:
+        """Get the scoring function based on selector."""
+        if selector == "tm_score":
+            return self._tm_score_function
+        elif selector == "rmsd":
+            return self._rmsd_function
+        else:
+            raise ValueError(f"Unknown selector: {selector}")
+
+    def _tm_score_function(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> float:
+        """Evaluate sample using TM-score."""
+        # Create temporary directory for evaluation
+        temp_dir = os.path.join(self.sampler._output_dir, "temp_eval")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        try:
+            # Save trajectory
+            traj_paths = self.sampler.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=temp_dir,
+            )
+
+            # Run evaluation
+            pdb_path = traj_paths["sample_path"]
+            sc_output_dir = os.path.join(temp_dir, "self_consistency")
+            os.makedirs(sc_output_dir, exist_ok=True)
+            shutil.copy(
+                pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
+            )
+
+            sc_results = self.sampler.run_self_consistency(
+                sc_output_dir, pdb_path, motif_mask=None
+            )
+
+            return sc_results["tm_score"].mean()
+
+        finally:
+            # Clean up temporary directory
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+    def _rmsd_function(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> float:
+        """Evaluate sample using RMSD (lower is better, so return negative)."""
+        # Similar to TM-score but return negative RMSD
+        temp_dir = os.path.join(self.sampler._output_dir, "temp_eval")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        try:
+            traj_paths = self.sampler.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=temp_dir,
+            )
+
+            pdb_path = traj_paths["sample_path"]
+            sc_output_dir = os.path.join(temp_dir, "self_consistency")
+            os.makedirs(sc_output_dir, exist_ok=True)
+            shutil.copy(
+                pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
+            )
+
+            sc_results = self.sampler.run_self_consistency(
+                sc_output_dir, pdb_path, motif_mask=None
+            )
+
+            return -sc_results["rmsd"].mean()  # Negative because lower RMSD is better
+
+        finally:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+
+class StandardInference(InferenceMethod):
+    """Standard inference method - single sample generation."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate a single sample using standard inference."""
+        return self.sampler._base_sample(sample_length, context)
+
+
+class BestOfNInference(InferenceMethod):
+    """Best-of-N inference method."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate N samples and return the best one."""
+        n_samples = self.config.get("n_samples", 5)
+        selector = self.config.get("selector", "tm_score")
+        temp_dir = self.config.get("temp_dir", None)
+
+        self._log.info(f"Running Best-of-N sampling with N={n_samples}")
+
+        if temp_dir is None:
+            temp_dir = os.path.join(
+                self.sampler._output_dir, f"best_of_{n_samples}_temp"
+            )
+            os.makedirs(temp_dir, exist_ok=True)
+
+        score_fn = self.get_score_function(selector)
+
+        best_sample = None
+        best_score = float("-inf")
+        best_metrics = None
+
+        for i in range(n_samples):
+            self._log.info(f"Generating sample {i+1}/{n_samples}")
+            sample_output = self.sampler._base_sample(sample_length, context)
+
+            # Evaluate the sample
+            score = score_fn(sample_output, sample_length)
+            self._log.info(f"Sample {i+1} score: {score:.4f}")
+
+            if score > best_score:
+                best_score = score
+                best_sample = sample_output
+                self._log.info(f"New best sample found: score = {best_score:.4f}")
+
+        self._log.info(
+            f"Best-of-{n_samples} sampling complete. Best score: {best_score:.4f}"
+        )
+
+        return {"sample": best_sample, "score": best_score, "method": "best_of_n"}
+
+
+class SDEPathExplorationInference(InferenceMethod):
+    """SDE path exploration inference with Euler-Maruyama sampling."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using SDE path exploration."""
+        num_branches = self.config.get("num_branches", 4)
+        num_keep = self.config.get("num_keep", 2)
+        noise_scale = self.config.get("noise_scale", 0.05)
+        selector = self.config.get("selector", "tm_score")
+        branch_start_time = self.config.get("branch_start_time", 0.0)
+
+        self._log.info(
+            f"Running SDE path exploration with {num_branches} branches, keeping {num_keep}"
+        )
+
+        if num_branches == 1 and num_keep == 1:
+            return self.sampler._base_sample(sample_length, context)
+
+        assert (
+            num_branches % num_keep == 0
+        ), "num_branches must be divisible by num_keep"
+        assert 0.0 <= branch_start_time < 1.0, "branch_start_time must be in [0, 1)"
+
+        score_fn = self.get_score_function(selector)
+
+        # Initialize features
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        # Run SDE path exploration
+        sample_out = self._sde_path_exploration_inference(
+            init_feats,
+            num_branches,
+            num_keep,
+            noise_scale,
+            score_fn,
+            sample_length,
+            branch_start_time,
+            context,
+        )
+
+        return tree.map_structure(lambda x: x[:, 0], sample_out)
+
+    def _sde_path_exploration_inference(
+        self,
+        data_init,
+        num_branches,
+        num_keep,
+        noise_scale,
+        score_fn,
+        sample_length,
+        branch_start_time,
+        context,
+    ):
+        """Core SDE path exploration logic."""
+        sample_feats = data_init.copy()
+        device = sample_feats["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Find branch start index
+        branch_start_idx = int(branch_start_time * len(reverse_steps))
+
+        all_bb_prots = []
+        current_samples = [sample_feats]
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(reverse_steps):
+                if step_idx < branch_start_idx:
+                    # Regular flow before branching
+                    for i, feats in enumerate(current_samples):
+                        feats = self.sampler.exp._set_t_feats(
+                            feats, t, torch.ones((1,)).to(device)
+                        )
+                        model_out = self.sampler.model(feats)
+
+                        rot_vectorfield = model_out["rot_vectorfield"]
+                        trans_vectorfield = model_out["trans_vectorfield"]
+
+                        fixed_mask = feats["fixed_mask"] * feats["res_mask"]
+                        flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
+
+                        rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                            rigid_t=du.Rigid.from_tensor_7(feats["rigids_t"]),
+                            rot_vectorfield=du.move_to_np(rot_vectorfield),
+                            trans_vectorfield=du.move_to_np(trans_vectorfield),
+                            flow_mask=du.move_to_np(flow_mask),
+                            t=t,
+                            dt=dt,
+                            center=True,
+                            noise_scale=1.0,
+                        )
+
+                        feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+                        current_samples[i] = feats
+                else:
+                    # Branching phase
+                    new_samples = []
+
+                    for feats in current_samples:
+                        # Create branches
+                        branches = []
+                        for _ in range(num_branches):
+                            branch_feats = tree.map_structure(
+                                lambda x: x.clone(), feats
+                            )
+
+                            # Apply SDE step with noise
+                            branch_feats = self.sampler.exp._set_t_feats(
+                                branch_feats, t, torch.ones((1,)).to(device)
+                            )
+                            model_out = self.sampler.model(branch_feats)
+
+                            rot_vectorfield = model_out["rot_vectorfield"]
+                            trans_vectorfield = model_out["trans_vectorfield"]
+
+                            # Add noise to vector fields for SDE
+                            noise_rot = (
+                                torch.randn_like(rot_vectorfield)
+                                * noise_scale
+                                * np.sqrt(dt)
+                            )
+                            noise_trans = (
+                                torch.randn_like(trans_vectorfield)
+                                * noise_scale
+                                * np.sqrt(dt)
+                            )
+
+                            rot_vectorfield = rot_vectorfield + noise_rot
+                            trans_vectorfield = trans_vectorfield + noise_trans
+
+                            fixed_mask = (
+                                branch_feats["fixed_mask"] * branch_feats["res_mask"]
+                            )
+                            flow_mask = (1 - branch_feats["fixed_mask"]) * branch_feats[
+                                "res_mask"
+                            ]
+
+                            rots_t, trans_t, rigids_t = (
+                                self.sampler.flow_matcher.reverse(
+                                    rigid_t=du.Rigid.from_tensor_7(
+                                        branch_feats["rigids_t"]
+                                    ),
+                                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                                    flow_mask=du.move_to_np(flow_mask),
+                                    t=t,
+                                    dt=dt,
+                                    center=True,
+                                    noise_scale=1.0,
+                                )
+                            )
+
+                            branch_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+                            branches.append(branch_feats)
+
+                        # Simulate branches to completion and evaluate
+                        branch_scores = []
+                        for branch_feats in branches:
+                            # Simulate to completion deterministically
+                            completed_sample = self._simulate_to_completion(
+                                branch_feats, reverse_steps[step_idx + 1 :], context
+                            )
+
+                            # Evaluate
+                            score = score_fn(completed_sample, sample_length)
+                            branch_scores.append(score)
+
+                        # Select best branches
+                        branch_scores = torch.tensor(branch_scores)
+                        top_k_indices = torch.topk(
+                            branch_scores, k=min(num_keep, len(branches))
+                        )[1]
+
+                        for idx in top_k_indices:
+                            new_samples.append(branches[idx])
+
+                    current_samples = new_samples
+
+            # Return best final sample
+            if len(current_samples) == 1:
+                final_sample = current_samples[0]
+            else:
+                # Evaluate all final samples and pick best
+                final_scores = []
+                for feats in current_samples:
+                    sample_out = self.sampler.exp.inference_fn(
+                        feats,
+                        num_t=1,
+                        min_t=min_t,
+                        aux_traj=True,
+                        noise_scale=1.0,
+                        context=context,
+                    )
+                    score = score_fn(sample_out, sample_length)
+                    final_scores.append(score)
+
+                best_idx = np.argmax(final_scores)
+                final_sample = current_samples[best_idx]
+
+            # Generate final output
+            sample_out = self.sampler.exp.inference_fn(
+                final_sample,
+                num_t=num_t,
+                min_t=min_t,
+                aux_traj=True,
+                noise_scale=1.0,
+                context=context,
+            )
+
+            return sample_out
+
+    def _simulate_to_completion(self, feats, remaining_steps, context):
+        """Simulate a branch to completion deterministically."""
+        device = feats["rigids_t"].device
+
+        with torch.no_grad():
+            for t in remaining_steps:
+                feats = self.sampler.exp._set_t_feats(
+                    feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+
+                fixed_mask = feats["fixed_mask"] * feats["res_mask"]
+                flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
+
+                dt = 1.0 / len(remaining_steps)  # Simplified dt calculation
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=du.Rigid.from_tensor_7(feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+        # Generate final sample
+        return self.sampler.exp.inference_fn(
+            feats, num_t=1, min_t=0.01, aux_traj=True, noise_scale=1.0, context=context
+        )
+
+
+class DivergenceFreeODEInference(InferenceMethod):
+    """Divergence-free ODE path exploration inference."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using divergence-free ODE path exploration."""
+        num_branches = self.config.get("num_branches", 4)
+        num_keep = self.config.get("num_keep", 2)
+        lambda_div = self.config.get("lambda_div", 0.2)
+        selector = self.config.get("selector", "tm_score")
+        branch_start_time = self.config.get("branch_start_time", 0.0)
+
+        self._log.info(
+            f"Running divergence-free ODE path exploration with {num_branches} branches, keeping {num_keep}"
+        )
+
+        if num_branches == 1 and num_keep == 1:
+            return self.sampler._base_sample(sample_length, context)
+
+        assert (
+            num_branches % num_keep == 0
+        ), "num_branches must be divisible by num_keep"
+        assert 0.0 <= branch_start_time < 1.0, "branch_start_time must be in [0, 1)"
+
+        score_fn = self.get_score_function(selector)
+
+        # Initialize features
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        # Run divergence-free ODE path exploration
+        sample_out = self._divergence_free_path_exploration_inference(
+            init_feats,
+            num_branches,
+            num_keep,
+            lambda_div,
+            score_fn,
+            sample_length,
+            branch_start_time,
+            context,
+        )
+
+        return tree.map_structure(lambda x: x[:, 0], sample_out)
+
+    def _divergence_free_path_exploration_inference(
+        self,
+        data_init,
+        num_branches,
+        num_keep,
+        lambda_div,
+        score_fn,
+        sample_length,
+        branch_start_time,
+        context,
+    ):
+        """Core divergence-free ODE path exploration logic."""
+        sample_feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
+        )
+        device = sample_feats["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Find branch start index
+        branch_start_idx = int(branch_start_time * len(reverse_steps))
+
+        current_samples = [sample_feats]
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(reverse_steps):
+                if step_idx < branch_start_idx:
+                    # Regular flow before branching
+                    for i, feats in enumerate(current_samples):
+                        feats = self.sampler.exp._set_t_feats(
+                            feats, t, torch.ones((1,)).to(device)
+                        )
+                        model_out = self.sampler.model(feats)
+
+                        rot_vectorfield = model_out["rot_vectorfield"]
+                        trans_vectorfield = model_out["trans_vectorfield"]
+
+                        # Apply divergence-free enhancement even before branching
+                        if lambda_div > 0:
+                            rigids_tensor = feats["rigids_t"]
+                            t_batch = torch.full(
+                                (rigids_tensor.shape[0],), t, device=device
+                            )
+
+                            enhanced_rot, enhanced_trans = apply_divergence_free_step(
+                                rigids_tensor,
+                                rot_vectorfield,
+                                trans_vectorfield,
+                                t_batch,
+                                dt,
+                                lambda_div,
+                            )
+                            rot_vectorfield = enhanced_rot
+                            trans_vectorfield = enhanced_trans
+
+                        fixed_mask = feats["fixed_mask"] * feats["res_mask"]
+                        flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
+
+                        rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                            rigid_t=ru.Rigid.from_tensor_7(feats["rigids_t"]),
+                            rot_vectorfield=du.move_to_np(rot_vectorfield),
+                            trans_vectorfield=du.move_to_np(trans_vectorfield),
+                            flow_mask=du.move_to_np(flow_mask),
+                            t=t,
+                            dt=dt,
+                            center=True,
+                            noise_scale=1.0,
+                        )
+
+                        feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+                        current_samples[i] = feats
+                else:
+                    # Branching phase with divergence-free exploration
+                    new_samples = []
+
+                    for feats in current_samples:
+                        # Create branches with different divergence-free fields
+                        branches = []
+                        for branch_idx in range(num_branches):
+                            branch_feats = tree.map_structure(
+                                lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                                feats,
+                            )
+
+                            # Apply divergence-free ODE step
+                            branch_feats = self.sampler.exp._set_t_feats(
+                                branch_feats, t, torch.ones((1,)).to(device)
+                            )
+                            model_out = self.sampler.model(branch_feats)
+
+                            rot_vectorfield = model_out["rot_vectorfield"]
+                            trans_vectorfield = model_out["trans_vectorfield"]
+
+                            # Apply divergence-free enhancement with different random seeds
+                            # Set different random seed for each branch to get different divergence-free fields
+                            torch.manual_seed(hash((step_idx, branch_idx)) % 2**32)
+
+                            rigids_tensor = branch_feats["rigids_t"]
+                            t_batch = torch.full(
+                                (rigids_tensor.shape[0],), t, device=device
+                            )
+
+                            enhanced_rot, enhanced_trans = apply_divergence_free_step(
+                                rigids_tensor,
+                                rot_vectorfield,
+                                trans_vectorfield,
+                                t_batch,
+                                dt,
+                                lambda_div,
+                            )
+
+                            fixed_mask = (
+                                branch_feats["fixed_mask"] * branch_feats["res_mask"]
+                            )
+                            flow_mask = (1 - branch_feats["fixed_mask"]) * branch_feats[
+                                "res_mask"
+                            ]
+
+                            rots_t, trans_t, rigids_t = (
+                                self.sampler.flow_matcher.reverse(
+                                    rigid_t=ru.Rigid.from_tensor_7(
+                                        branch_feats["rigids_t"]
+                                    ),
+                                    rot_vectorfield=du.move_to_np(enhanced_rot),
+                                    trans_vectorfield=du.move_to_np(enhanced_trans),
+                                    flow_mask=du.move_to_np(flow_mask),
+                                    t=t,
+                                    dt=dt,
+                                    center=True,
+                                    noise_scale=1.0,
+                                )
+                            )
+
+                            branch_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+                            branches.append(branch_feats)
+
+                        # Simulate branches to completion deterministically and evaluate
+                        branch_scores = []
+                        for branch_feats in branches:
+                            # Simulate to completion WITHOUT divergence-free fields (deterministic)
+                            completed_sample = (
+                                self._simulate_to_completion_deterministic(
+                                    branch_feats, reverse_steps[step_idx + 1 :], context
+                                )
+                            )
+
+                            # Evaluate
+                            score = score_fn(completed_sample, sample_length)
+                            branch_scores.append(score)
+
+                        # Select best branches
+                        branch_scores = torch.tensor(branch_scores)
+                        top_k_indices = torch.topk(
+                            branch_scores, k=min(num_keep, len(branches))
+                        )[1]
+
+                        for idx in top_k_indices:
+                            new_samples.append(branches[idx])
+
+                    current_samples = new_samples
+
+            # Return best final sample
+            if len(current_samples) == 1:
+                final_sample = current_samples[0]
+            else:
+                # Evaluate all final samples and pick best
+                final_scores = []
+                for feats in current_samples:
+                    sample_out = self.sampler.exp.inference_fn(
+                        feats,
+                        num_t=1,
+                        min_t=min_t,
+                        aux_traj=True,
+                        noise_scale=1.0,
+                        context=context,
+                    )
+                    score = score_fn(sample_out, sample_length)
+                    final_scores.append(score)
+
+                best_idx = np.argmax(final_scores)
+                final_sample = current_samples[best_idx]
+
+            # Generate final output
+            sample_out = self.sampler.exp.inference_fn(
+                final_sample,
+                num_t=num_t,
+                min_t=min_t,
+                aux_traj=True,
+                noise_scale=1.0,
+                context=context,
+            )
+
+            return sample_out
+
+    def _simulate_to_completion_deterministic(self, feats, remaining_steps, context):
+        """Simulate a branch to completion deterministically (no divergence-free fields)."""
+        device = feats["rigids_t"].device
+
+        with torch.no_grad():
+            for t in remaining_steps:
+                feats = self.sampler.exp._set_t_feats(
+                    feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(feats)
+
+                # Use only the original vector fields, no divergence-free enhancement
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+
+                fixed_mask = feats["fixed_mask"] * feats["res_mask"]
+                flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
+
+                dt = 1.0 / len(remaining_steps) if len(remaining_steps) > 0 else 0.01
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+        # Generate final sample
+        return self.sampler.exp.inference_fn(
+            feats, num_t=1, min_t=0.01, aux_traj=True, noise_scale=1.0, context=context
+        )
+
+
+def get_inference_method(
+    method_name: str, sampler, config: Dict[str, Any]
+) -> InferenceMethod:
+    """Factory function to get inference method by name."""
+    methods = {
+        "standard": StandardInference,
+        "best_of_n": BestOfNInference,
+        "sde_path_exploration": SDEPathExplorationInference,
+        "divergence_free_ode": DivergenceFreeODEInference,
+    }
+
+    if method_name not in methods:
+        raise ValueError(
+            f"Unknown inference method: {method_name}. Available: {list(methods.keys())}"
+        )
+
+    return methods[method_name](sampler, config)

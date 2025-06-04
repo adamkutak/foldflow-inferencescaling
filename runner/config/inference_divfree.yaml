@@ -1,0 +1,14 @@
+# Configuration for divergence-free ODE path exploration inference
+defaults:
+  - inference
+  - _self_
+
+inference:
+  samples:
+    inference_method: "divergence_free_ode"
+    method_config:
+      num_branches: 4  # Number of branches per step
+      num_keep: 2  # Number of branches to keep
+      lambda_div: 0.2  # Scale factor for divergence-free field
+      selector: "tm_score"  # Scoring function
+      branch_start_time: 0.0  # When to start branching (0.0 to 1.0) 
