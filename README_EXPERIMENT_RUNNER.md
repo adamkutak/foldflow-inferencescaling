@@ -28,8 +28,9 @@ python experiment_runner.py \
     --num_samples 20 \
     --sample_length 100 \
     --scoring_function tm_score \
-    --noise_scale 0.05 \
-    --lambda_div 0.2 \
+    --noise_scale 0.1 \
+    --lambda_div 0.3 \
+    --branch_interval 0.1 \
     --output_dir experiments
 ```
 
@@ -42,6 +43,7 @@ python experiment_runner.py \
 | `--scoring_function` | str | tm_score | Scoring function (`tm_score` or `rmsd`) |
 | `--noise_scale` | float | 0.05 | Noise scale for SDE path exploration |
 | `--lambda_div` | float | 0.2 | Lambda parameter for divergence-free ODE |
+| `--branch_interval` | float | 0.0 | Time interval between branches |
 | `--output_dir` | str | experiments | Base directory for experiment outputs |
 
 ## Experiment Design

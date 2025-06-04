@@ -185,6 +185,7 @@ class SDEPathExplorationInference(InferenceMethod):
         noise_scale = self.config.get("noise_scale", 0.05)
         selector = self.config.get("selector", "tm_score")
         branch_start_time = self.config.get("branch_start_time", 0.0)
+        branch_interval = self.config.get("branch_interval", 0.0)
 
         self._log.info(
             f"Running SDE path exploration with {num_branches} branches, keeping {num_keep}"
@@ -197,6 +198,7 @@ class SDEPathExplorationInference(InferenceMethod):
             num_branches % num_keep == 0
         ), "num_branches must be divisible by num_keep"
         assert 0.0 <= branch_start_time < 1.0, "branch_start_time must be in [0, 1)"
+        assert branch_interval >= 0.0, "branch_interval must be >= 0.0"
 
         score_fn = self.get_score_function(selector)
 
@@ -240,6 +242,7 @@ class SDEPathExplorationInference(InferenceMethod):
             score_fn,
             sample_length,
             branch_start_time,
+            branch_interval,
             context,
         )
 
@@ -254,6 +257,7 @@ class SDEPathExplorationInference(InferenceMethod):
         score_fn,
         sample_length,
         branch_start_time,
+        branch_interval,
         context,
     ):
         """Core SDE path exploration logic."""
@@ -266,16 +270,21 @@ class SDEPathExplorationInference(InferenceMethod):
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
         dt = reverse_steps[0] - reverse_steps[1]
 
-        # Find branch start index
-        branch_start_idx = int(branch_start_time * len(reverse_steps))
-
-        all_bb_prots = []
         current_samples = [sample_feats]
 
         with torch.no_grad():
             for step_idx, t in enumerate(reverse_steps):
-                if step_idx < branch_start_idx:
-                    # Regular flow before branching
+                # Simple branching condition: branch if t >= branch_start_time and t is multiple of branch_interval
+                should_branch = t >= branch_start_time
+                if branch_interval > 0.0:
+                    # Only branch if t is approximately a multiple of branch_interval
+                    should_branch = should_branch and (
+                        abs(t % branch_interval) < 0.001
+                        or abs(t % branch_interval - branch_interval) < 0.001
+                    )
+
+                if not should_branch:
+                    # Regular flow without branching
                     for i, feats in enumerate(current_samples):
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
@@ -468,6 +477,7 @@ class DivergenceFreeODEInference(InferenceMethod):
         lambda_div = self.config.get("lambda_div", 0.2)
         selector = self.config.get("selector", "tm_score")
         branch_start_time = self.config.get("branch_start_time", 0.0)
+        branch_interval = self.config.get("branch_interval", 0.0)
 
         self._log.info(
             f"Running divergence-free ODE path exploration with {num_branches} branches, keeping {num_keep}"
@@ -480,6 +490,7 @@ class DivergenceFreeODEInference(InferenceMethod):
             num_branches % num_keep == 0
         ), "num_branches must be divisible by num_keep"
         assert 0.0 <= branch_start_time < 1.0, "branch_start_time must be in [0, 1)"
+        assert branch_interval >= 0.0, "branch_interval must be >= 0.0"
 
         score_fn = self.get_score_function(selector)
 
@@ -523,6 +534,7 @@ class DivergenceFreeODEInference(InferenceMethod):
             score_fn,
             sample_length,
             branch_start_time,
+            branch_interval,
             context,
         )
 
@@ -537,6 +549,7 @@ class DivergenceFreeODEInference(InferenceMethod):
         score_fn,
         sample_length,
         branch_start_time,
+        branch_interval,
         context,
     ):
         """Core divergence-free ODE path exploration logic."""
@@ -551,15 +564,21 @@ class DivergenceFreeODEInference(InferenceMethod):
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
         dt = reverse_steps[0] - reverse_steps[1]
 
-        # Find branch start index
-        branch_start_idx = int(branch_start_time * len(reverse_steps))
-
         current_samples = [sample_feats]
 
         with torch.no_grad():
             for step_idx, t in enumerate(reverse_steps):
-                if step_idx < branch_start_idx:
-                    # Regular flow before branching
+                # Simple branching condition: branch if t >= branch_start_time and t is multiple of branch_interval
+                should_branch = t >= branch_start_time
+                if branch_interval > 0.0:
+                    # Only branch if t is approximately a multiple of branch_interval
+                    should_branch = should_branch and (
+                        abs(t % branch_interval) < 0.001
+                        or abs(t % branch_interval - branch_interval) < 0.001
+                    )
+
+                if not should_branch:
+                    # Regular flow without branching
                     for i, feats in enumerate(current_samples):
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
@@ -569,7 +588,7 @@ class DivergenceFreeODEInference(InferenceMethod):
                         rot_vectorfield = model_out["rot_vectorfield"]
                         trans_vectorfield = model_out["trans_vectorfield"]
 
-                        # Apply divergence-free enhancement even before branching
+                        # Apply divergence-free enhancement even during non-branching steps
                         if lambda_div > 0:
                             rigids_tensor = feats["rigids_t"]
                             t_batch = torch.full(

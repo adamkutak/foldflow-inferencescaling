@@ -1,14 +1,19 @@
 # Configuration for divergence-free ODE path exploration inference
 defaults:
-  - inference
+  - base
+  - override model: ff2
   - _self_
 
 inference:
+  flow:
+    num_t: 50
+
   samples:
     inference_method: "divergence_free_ode"
     method_config:
-      num_branches: 4  # Number of branches per step
-      num_keep: 2  # Number of branches to keep
-      lambda_div: 0.2  # Scale factor for divergence-free field
-      selector: "tm_score"  # Scoring function
-      branch_start_time: 0.0  # When to start branching (0.0 to 1.0) 
+      num_branches: 4          # Number of branches to explore  
+      num_keep: 2             # Number of best branches to keep
+      lambda_div: 0.2         # Divergence-free field strength
+      selector: "tm_score"    # Scoring function: "tm_score" or "rmsd"
+      branch_start_time: 0.0  # When to start branching (0.0 to 1.0)
+      branch_interval: 0.1    # Time interval between branches (0.0 = every timestep) 

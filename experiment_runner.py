@@ -202,6 +202,7 @@ class ExperimentRunner:
                         "noise_scale": self.args.noise_scale,
                         "selector": self.args.scoring_function,
                         "branch_start_time": 0.0,
+                        "branch_interval": self.args.branch_interval,
                     },
                 }
             )
@@ -217,6 +218,7 @@ class ExperimentRunner:
                         "lambda_div": self.args.lambda_div,
                         "selector": self.args.scoring_function,
                         "branch_start_time": 0.0,
+                        "branch_interval": self.args.branch_interval,
                     },
                 }
             )
@@ -405,7 +407,14 @@ def main():
         "--lambda_div",
         type=float,
         default=0.2,
-        help="Lambda parameter for divergence-free ODE",
+        help="Lambda for divergence-free vector fields",
+    )
+
+    parser.add_argument(
+        "--branch_interval",
+        type=float,
+        default=0.2,
+        help="Time interval between branches (0.0 = every timestep, 0.1 = every 0.1 time units)",
     )
 
     parser.add_argument(
@@ -424,6 +433,7 @@ def main():
     print(f"  Scoring function: {args.scoring_function}")
     print(f"  Noise scale (SDE): {args.noise_scale}")
     print(f"  Lambda div (ODE): {args.lambda_div}")
+    print(f"  Branch interval: {args.branch_interval}")
     print()
 
     # Create and run experiments
