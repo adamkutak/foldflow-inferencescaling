@@ -49,7 +49,7 @@ inference:
     
     # Inference method configuration
     # Options: "standard", "best_of_n", "sde_path_exploration", "divergence_free_ode"
-    inference_method: "best_of_n"
+    inference_method: "standard"
     
     # Method-specific configuration
     method_config:

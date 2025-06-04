@@ -63,6 +63,11 @@ class ExperimentRunner:
         self.base_conf.inference.samples.max_length = self.args.sample_length
         self.base_conf.inference.samples.length_step = 1
 
+        # Override GPU if specified
+        if self.args.gpu_id is not None:
+            self.base_conf.inference.gpu_id = self.args.gpu_id
+            self.logger.info(f"Using GPU {self.args.gpu_id}")
+
         # Create output directory for experiments
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.experiment_dir = os.path.join(
@@ -406,7 +411,7 @@ def main():
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.2,
+        default=0.4,
         help="Lambda for divergence-free vector fields",
     )
 
@@ -415,6 +420,13 @@ def main():
         type=float,
         default=0.2,
         help="Time interval between branches (0.0 = every timestep, 0.1 = every 0.1 time units)",
+    )
+
+    parser.add_argument(
+        "--gpu_id",
+        type=int,
+        default=1,
+        help="GPU ID to use for inference (overrides config file)",
     )
 
     parser.add_argument(
@@ -434,6 +446,9 @@ def main():
     print(f"  Noise scale (SDE): {args.noise_scale}")
     print(f"  Lambda div (ODE): {args.lambda_div}")
     print(f"  Branch interval: {args.branch_interval}")
+    print(
+        f"  GPU ID: {args.gpu_id if args.gpu_id is not None else 'from config (default: 1)'}"
+    )
     print()
 
     # Create and run experiments
