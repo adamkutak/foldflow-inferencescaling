@@ -1,20 +1,23 @@
 name: foldflow-env
 channels:
+  - pytorch
+  - nvidia
+  - anaconda
   - conda-forge
+  - defaults
 dependencies:
-  # Core
-  - python >=3.10,<3.11
+  - python>=3.8,<3.11
   - pytorch<2
   - libstdcxx-ng
-  - openmm
-  - dm-tree
+  - mdtraj
   - pip
+  # - pdbfixer=1.8.1
   - pip:
-      - mdtraj==1.9.7
       - biopython
       - click
       - corner
       - debugpy
+      - dm-tree
       - einops
       - fair-esm
       - git+https://github.com/joeybose/geomstats.git
@@ -32,6 +35,7 @@ dependencies:
       - tmtools
       - tqdm
       - wandb>=0.15.1
+      - OpenMM
       - pydantic
       - biotite
       - -e .
