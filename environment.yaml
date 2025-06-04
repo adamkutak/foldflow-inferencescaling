@@ -4,11 +4,11 @@ channels:
 dependencies:
   - python=3.9.15
   - pytorch<2
-  # - libstdcxx-ng
-  - mdtraj=1.9.7
+  - libstdcxx-ng
   - pip
   # - pdbfixer=1.8.1
   - pip:
+      - mdtraj=1.9.7
       - biopython
       - click
       - corner
