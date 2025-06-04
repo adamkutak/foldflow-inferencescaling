@@ -8,7 +8,6 @@ dependencies:
   - pip
   # - pdbfixer=1.8.1
   - pip:
-      - mdtraj
       - biopython
       - click
       - corner
@@ -35,3 +34,4 @@ dependencies:
       - pydantic
       - biotite
       - -e .
+      - mdtraj==1.9.7
