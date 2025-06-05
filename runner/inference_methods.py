@@ -298,7 +298,7 @@ class SDEPathExplorationInference(InferenceMethod):
                         flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
 
                         rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
-                            rigid_t=du.Rigid.from_tensor_7(feats["rigids_t"]),
+                            rigid_t=ru.Rigid.from_tensor_7(feats["rigids_t"]),
                             rot_vectorfield=du.move_to_np(rot_vectorfield),
                             trans_vectorfield=du.move_to_np(trans_vectorfield),
                             flow_mask=du.move_to_np(flow_mask),
@@ -355,7 +355,7 @@ class SDEPathExplorationInference(InferenceMethod):
 
                             rots_t, trans_t, rigids_t = (
                                 self.sampler.flow_matcher.reverse(
-                                    rigid_t=du.Rigid.from_tensor_7(
+                                    rigid_t=ru.Rigid.from_tensor_7(
                                         branch_feats["rigids_t"]
                                     ),
                                     rot_vectorfield=du.move_to_np(rot_vectorfield),
@@ -447,7 +447,7 @@ class SDEPathExplorationInference(InferenceMethod):
                 dt = 1.0 / len(remaining_steps)  # Simplified dt calculation
 
                 rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
-                    rigid_t=du.Rigid.from_tensor_7(feats["rigids_t"]),
+                    rigid_t=ru.Rigid.from_tensor_7(feats["rigids_t"]),
                     rot_vectorfield=du.move_to_np(rot_vectorfield),
                     trans_vectorfield=du.move_to_np(trans_vectorfield),
                     flow_mask=du.move_to_np(flow_mask),
