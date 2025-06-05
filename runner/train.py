@@ -1,4 +1,5 @@
 """Pytorch script for training FoldFlow."""
+
 import os
 
 # This line magically changes some tensors to double precision
@@ -38,7 +39,7 @@ class Experiment:
         self,
         *,
         conf: DictConfig,
-        model = None,
+        model=None,
     ):
         """Initialize experiment.
 
@@ -112,9 +113,13 @@ class Experiment:
         self._flow_matcher = se3_fm.SE3FlowMatcher(self._fm_conf)
         self._model = model
         if self._model is None:
-            self._model = network.VectorFieldNetwork(self._model_conf, self.flow_matcher)
+            self._model = network.VectorFieldNetwork(
+                self._model_conf, self.flow_matcher
+            )
             if ckpt_model is not None:
-                ckpt_model = {k.replace("module.", ""): v for k, v in ckpt_model.items()}
+                ckpt_model = {
+                    k.replace("module.", ""): v for k, v in ckpt_model.items()
+                }
                 ckpt_model = {
                     k.replace("score_model.", "vectorfield."): v
                     for k, v in ckpt_model.items()
@@ -916,6 +921,7 @@ class Experiment:
         if min_t is None:
             min_t = self._data_conf.min_t
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        breakpoint()
         dt = reverse_steps[0] - reverse_steps[1]
         # dt = 1/num_t
         all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
