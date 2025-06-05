@@ -57,6 +57,8 @@ class ExperimentRunner:
         inference_config_path = "runner/config/inference.yaml"
         flow_matcher_config_path = "runner/config/flow_matcher/default.yaml"
         data_config_path = "runner/config/data/default.yaml"
+        wandb_config_path = "runner/config/wandb/default.yaml"
+        experiment_config_path = "runner/config/experiment/baseline.yaml"
 
         # Load each config
         base_conf = OmegaConf.load(base_config_path)
@@ -64,6 +66,8 @@ class ExperimentRunner:
         inference_conf = OmegaConf.load(inference_config_path)
         flow_matcher_conf = OmegaConf.load(flow_matcher_config_path)
         data_conf = OmegaConf.load(data_config_path)
+        wandb_conf = OmegaConf.load(wandb_config_path)
+        experiment_conf = OmegaConf.load(experiment_config_path)
 
         # Create merged configuration
         self.base_conf = OmegaConf.create({})
@@ -75,6 +79,8 @@ class ExperimentRunner:
             {"model": model_conf},
             {"flow_matcher": flow_matcher_conf},
             {"data": data_conf},
+            {"wandb": wandb_conf},
+            {"experiment": experiment_conf},
             inference_conf,
         )
 
