@@ -49,7 +49,7 @@ inference:
     # SDE Path Exploration Method
     inference_method: "sde_path_exploration"
     method_config:
-      num_branches: 4          # Number of branches to explore
+      num_branches: 2          # Number of branches to explore
       num_keep: 1             # Number of best branches to keep
       noise_scale: 0.05       # SDE noise scale
       selector: "tm_score"    # Scoring function: "tm_score" or "rmsd"
