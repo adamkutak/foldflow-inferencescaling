@@ -117,6 +117,42 @@ class InferenceMethod(ABC):
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
 
+    def _simulate_to_completion(self, feats, current_t, dt, remaining_steps, context):
+        """Simulate a branch to completion deterministically from current_t to min_t."""
+        device = feats["rigids_t"].device
+        min_t = self.sampler._fm_conf.min_t
+
+        with torch.no_grad():
+            for t in remaining_steps:
+                feats = self.sampler.exp._set_t_feats(
+                    feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+
+                fixed_mask = feats["fixed_mask"] * feats["res_mask"]
+                flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+        # Generate final sample
+        return self.sampler.exp.inference_fn(
+            feats, num_t=1, min_t=min_t, aux_traj=True, noise_scale=1.0, context=context
+        )
+
 
 class StandardInference(InferenceMethod):
     """Standard inference method - single sample generation."""
@@ -284,7 +320,7 @@ class SDEPathExplorationInference(InferenceMethod):
                     )
 
                 if not should_branch:
-                    # Regular flow without branching
+                    # Regular flow with SDE noise at every step
                     for i, feats in enumerate(current_samples):
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
@@ -293,6 +329,21 @@ class SDEPathExplorationInference(InferenceMethod):
 
                         rot_vectorfield = model_out["rot_vectorfield"]
                         trans_vectorfield = model_out["trans_vectorfield"]
+
+                        # Add SDE noise at every step
+                        noise_rot = (
+                            torch.randn_like(rot_vectorfield)
+                            * noise_scale
+                            * np.sqrt(dt)
+                        )
+                        noise_trans = (
+                            torch.randn_like(trans_vectorfield)
+                            * noise_scale
+                            * np.sqrt(dt)
+                        )
+
+                        rot_vectorfield = rot_vectorfield + noise_rot
+                        trans_vectorfield = trans_vectorfield + noise_trans
 
                         fixed_mask = feats["fixed_mask"] * feats["res_mask"]
                         flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
@@ -376,7 +427,11 @@ class SDEPathExplorationInference(InferenceMethod):
                         for branch_feats in branches:
                             # Simulate to completion deterministically
                             completed_sample = self._simulate_to_completion(
-                                branch_feats, reverse_steps[step_idx + 1 :], context
+                                branch_feats,
+                                t,
+                                dt,
+                                reverse_steps[step_idx + 1 :],
+                                context,
                             )
 
                             # Evaluate
@@ -426,43 +481,6 @@ class SDEPathExplorationInference(InferenceMethod):
             )
 
             return sample_out
-
-    def _simulate_to_completion(self, feats, remaining_steps, context):
-        """Simulate a branch to completion deterministically."""
-        device = feats["rigids_t"].device
-
-        with torch.no_grad():
-            for t in remaining_steps:
-                feats = self.sampler.exp._set_t_feats(
-                    feats, t, torch.ones((1,)).to(device)
-                )
-                model_out = self.sampler.model(feats)
-
-                rot_vectorfield = model_out["rot_vectorfield"]
-                trans_vectorfield = model_out["trans_vectorfield"]
-
-                fixed_mask = feats["fixed_mask"] * feats["res_mask"]
-                flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
-
-                dt = 1.0 / len(remaining_steps)  # Simplified dt calculation
-
-                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
-                    rigid_t=ru.Rigid.from_tensor_7(feats["rigids_t"]),
-                    rot_vectorfield=du.move_to_np(rot_vectorfield),
-                    trans_vectorfield=du.move_to_np(trans_vectorfield),
-                    flow_mask=du.move_to_np(flow_mask),
-                    t=t,
-                    dt=dt,
-                    center=True,
-                    noise_scale=1.0,
-                )
-
-                feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-
-        # Generate final sample
-        return self.sampler.exp.inference_fn(
-            feats, num_t=1, min_t=0.01, aux_traj=True, noise_scale=1.0, context=context
-        )
 
 
 class DivergenceFreeODEInference(InferenceMethod):
@@ -578,7 +596,7 @@ class DivergenceFreeODEInference(InferenceMethod):
                     )
 
                 if not should_branch:
-                    # Regular flow without branching
+                    # Regular flow with divergence-free noise at every step
                     for i, feats in enumerate(current_samples):
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
@@ -588,23 +606,22 @@ class DivergenceFreeODEInference(InferenceMethod):
                         rot_vectorfield = model_out["rot_vectorfield"]
                         trans_vectorfield = model_out["trans_vectorfield"]
 
-                        # Apply divergence-free enhancement even during non-branching steps
-                        if lambda_div > 0:
-                            rigids_tensor = feats["rigids_t"]
-                            t_batch = torch.full(
-                                (rigids_tensor.shape[0],), t, device=device
-                            )
+                        # Add divergence-free noise at every step
+                        rigids_tensor = feats["rigids_t"]
+                        t_batch = torch.full(
+                            (rigids_tensor.shape[0],), t, device=device
+                        )
 
-                            enhanced_rot, enhanced_trans = apply_divergence_free_step(
-                                rigids_tensor,
-                                rot_vectorfield,
-                                trans_vectorfield,
-                                t_batch,
-                                dt,
-                                lambda_div,
-                            )
-                            rot_vectorfield = enhanced_rot
-                            trans_vectorfield = enhanced_trans
+                        enhanced_rot, enhanced_trans = apply_divergence_free_step(
+                            rigids_tensor,
+                            rot_vectorfield,
+                            trans_vectorfield,
+                            t_batch,
+                            dt,
+                            lambda_div,
+                        )
+                        rot_vectorfield = enhanced_rot
+                        trans_vectorfield = enhanced_trans
 
                         fixed_mask = feats["fixed_mask"] * feats["res_mask"]
                         flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
@@ -643,10 +660,6 @@ class DivergenceFreeODEInference(InferenceMethod):
 
                             rot_vectorfield = model_out["rot_vectorfield"]
                             trans_vectorfield = model_out["trans_vectorfield"]
-
-                            # Apply divergence-free enhancement with different random seeds
-                            # Set different random seed for each branch to get different divergence-free fields
-                            torch.manual_seed(hash((step_idx, branch_idx)) % 2**32)
 
                             rigids_tensor = branch_feats["rigids_t"]
                             t_batch = torch.full(
@@ -690,11 +703,13 @@ class DivergenceFreeODEInference(InferenceMethod):
                         # Simulate branches to completion deterministically and evaluate
                         branch_scores = []
                         for branch_feats in branches:
-                            # Simulate to completion WITHOUT divergence-free fields (deterministic)
-                            completed_sample = (
-                                self._simulate_to_completion_deterministic(
-                                    branch_feats, reverse_steps[step_idx + 1 :], context
-                                )
+                            # Simulate to completion deterministically
+                            completed_sample = self._simulate_to_completion(
+                                branch_feats,
+                                t,
+                                dt,
+                                reverse_steps[step_idx + 1 :],
+                                context,
                             )
 
                             # Evaluate
@@ -744,44 +759,6 @@ class DivergenceFreeODEInference(InferenceMethod):
             )
 
             return sample_out
-
-    def _simulate_to_completion_deterministic(self, feats, remaining_steps, context):
-        """Simulate a branch to completion deterministically (no divergence-free fields)."""
-        device = feats["rigids_t"].device
-
-        with torch.no_grad():
-            for t in remaining_steps:
-                feats = self.sampler.exp._set_t_feats(
-                    feats, t, torch.ones((1,)).to(device)
-                )
-                model_out = self.sampler.model(feats)
-
-                # Use only the original vector fields, no divergence-free enhancement
-                rot_vectorfield = model_out["rot_vectorfield"]
-                trans_vectorfield = model_out["trans_vectorfield"]
-
-                fixed_mask = feats["fixed_mask"] * feats["res_mask"]
-                flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
-
-                dt = 1.0 / len(remaining_steps) if len(remaining_steps) > 0 else 0.01
-
-                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
-                    rigid_t=ru.Rigid.from_tensor_7(feats["rigids_t"]),
-                    rot_vectorfield=du.move_to_np(rot_vectorfield),
-                    trans_vectorfield=du.move_to_np(trans_vectorfield),
-                    flow_mask=du.move_to_np(flow_mask),
-                    t=t,
-                    dt=dt,
-                    center=True,
-                    noise_scale=1.0,
-                )
-
-                feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-
-        # Generate final sample
-        return self.sampler.exp.inference_fn(
-            feats, num_t=1, min_t=0.01, aux_traj=True, noise_scale=1.0, context=context
-        )
 
 
 def get_inference_method(

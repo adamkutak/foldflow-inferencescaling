@@ -51,6 +51,7 @@ inference:
     method_config:
       num_branches: 4          # Number of branches to explore
       num_keep: 1             # Number of best branches to keep
+      lambda_div: 0.2         # Divergence-free field strength
       selector: "tm_score"    # Scoring function: "tm_score" or "rmsd"
       branch_start_time: 0.0  # When to start branching (0.0 to 1.0)
       branch_interval: 0.1    # Time interval between branches (0.0 = every timestep) 
