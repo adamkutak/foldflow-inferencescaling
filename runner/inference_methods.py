@@ -329,7 +329,9 @@ class SDEPathExplorationInference(InferenceMethod):
             context,
         )
 
-        return tree.map_structure(lambda x: x[:, 0], sample_out)
+        mapped_sample_out = tree.map_structure(lambda x: x[:, 0], sample_out)
+        breakpoint()
+        return mapped_sample_out
 
     def _sde_path_exploration_inference(
         self,
