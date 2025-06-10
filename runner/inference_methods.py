@@ -22,7 +22,7 @@ from foldflow.data import utils as du
 from foldflow.data import residue_constants, all_atom
 from openfold.utils import rigid_utils as ru
 from tools.analysis import metrics
-from runner.divergence_free_utils import apply_divergence_free_step
+from runner.divergence_free_utils import divfree_swirl_si
 
 
 class InferenceMethod(ABC):
@@ -697,16 +697,31 @@ class DivergenceFreeODEInference(InferenceMethod):
                             (rigids_tensor.shape[0],), t, device=device
                         )
 
-                        enhanced_rot, enhanced_trans = apply_divergence_free_step(
-                            rigids_tensor,
-                            rot_vectorfield,
-                            trans_vectorfield,
+                        # Generate divergence-free noise for rotation field
+                        rot_divfree_noise = divfree_swirl_si(
+                            rigids_tensor[
+                                ..., :3
+                            ],  # Use first 3 components for rotation
                             t_batch,
-                            dt,
-                            lambda_div,
+                            None,  # y not used
+                            rot_vectorfield,
                         )
-                        rot_vectorfield = enhanced_rot
-                        trans_vectorfield = enhanced_trans
+
+                        # Generate divergence-free noise for translation field
+                        trans_divfree_noise = divfree_swirl_si(
+                            rigids_tensor[..., 4:],  # Translation components
+                            t_batch,
+                            None,  # y not used
+                            trans_vectorfield,
+                        )
+
+                        # Add divergence-free noise to vector fields (no sqrt(dt) scaling)
+                        rot_vectorfield = (
+                            rot_vectorfield + lambda_div * rot_divfree_noise
+                        )
+                        trans_vectorfield = (
+                            trans_vectorfield + lambda_div * trans_divfree_noise
+                        )
 
                         fixed_mask = feats["fixed_mask"] * feats["res_mask"]
                         flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
@@ -773,13 +788,30 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 (rigids_tensor.shape[0],), t, device=device
                             )
 
-                            enhanced_rot, enhanced_trans = apply_divergence_free_step(
-                                rigids_tensor,
-                                rot_vectorfield,
-                                trans_vectorfield,
+                            # Generate divergence-free noise for rotation field
+                            rot_divfree_noise = divfree_swirl_si(
+                                rigids_tensor[
+                                    ..., :3
+                                ],  # Use first 3 components for rotation
                                 t_batch,
-                                dt,
-                                lambda_div,
+                                None,  # y not used
+                                rot_vectorfield,
+                            )
+
+                            # Generate divergence-free noise for translation field
+                            trans_divfree_noise = divfree_swirl_si(
+                                rigids_tensor[..., 4:],  # Translation components
+                                t_batch,
+                                None,  # y not used
+                                trans_vectorfield,
+                            )
+
+                            # Add divergence-free noise to vector fields (no sqrt(dt) scaling)
+                            rot_vectorfield = (
+                                rot_vectorfield + lambda_div * rot_divfree_noise
+                            )
+                            trans_vectorfield = (
+                                trans_vectorfield + lambda_div * trans_divfree_noise
                             )
 
                             fixed_mask = (
@@ -794,8 +826,8 @@ class DivergenceFreeODEInference(InferenceMethod):
                                     rigid_t=ru.Rigid.from_tensor_7(
                                         branch_feats["rigids_t"]
                                     ),
-                                    rot_vectorfield=du.move_to_np(enhanced_rot),
-                                    trans_vectorfield=du.move_to_np(enhanced_trans),
+                                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                                    trans_vectorfield=du.move_to_np(trans_vectorfield),
                                     flow_mask=du.move_to_np(flow_mask),
                                     t=t,
                                     dt=dt,
