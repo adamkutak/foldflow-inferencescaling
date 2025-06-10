@@ -14,12 +14,12 @@ import shutil
 import numpy as np
 import torch
 import tree
+import copy
 from typing import Optional, Dict, Any, Callable
 from abc import ABC, abstractmethod
-import copy
 
 from foldflow.data import utils as du
-from foldflow.data import residue_constants
+from foldflow.data import residue_constants, all_atom
 from openfold.utils import rigid_utils as ru
 from tools.analysis import metrics
 from runner.divergence_free_utils import apply_divergence_free_step
@@ -168,8 +168,6 @@ class InferenceMethod(ABC):
                     flow_mask[..., None] * pred_trans_0
                     + fixed_mask[..., None] * gt_trans_0
                 )
-
-                from foldflow.models.components import all_atom
 
                 atom37_0 = all_atom.compute_backbone(
                     ru.Rigid.from_tensor_7(rigid_pred), psi_pred
@@ -426,8 +424,6 @@ class SDEPathExplorationInference(InferenceMethod):
                                 flow_mask[..., None] * pred_trans_0
                                 + fixed_mask[..., None] * gt_trans_0
                             )
-
-                            from foldflow.models.components import all_atom
 
                             atom37_0 = all_atom.compute_backbone(
                                 ru.Rigid.from_tensor_7(rigid_pred), psi_pred
@@ -740,8 +736,6 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 flow_mask[..., None] * pred_trans_0
                                 + fixed_mask[..., None] * gt_trans_0
                             )
-
-                            from foldflow.models.components import all_atom
 
                             atom37_0 = all_atom.compute_backbone(
                                 ru.Rigid.from_tensor_7(rigid_pred), psi_pred
