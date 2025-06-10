@@ -169,15 +169,25 @@ class InferenceMethod(ABC):
                     + fixed_mask[..., None] * gt_trans_0
                 )
 
+                # Remove batch dimension for backbone computation
+                rigid_pred_no_batch = rigid_pred[0]  # Remove batch dim
+                psi_pred_no_batch = psi_pred[0]  # Remove batch dim
+
                 atom37_0 = all_atom.compute_backbone(
-                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                    ru.Rigid.from_tensor_7(rigid_pred_no_batch), psi_pred_no_batch
                 )[0]
                 all_bb_0_pred.append(du.move_to_np(atom37_0))
-                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                all_trans_0_pred.append(
+                    du.move_to_np(trans_pred_0[0])
+                )  # Remove batch dim
 
-                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                # Remove batch dimension for rigids_t as well
+                rigids_t_no_batch = ru.Rigid.from_tensor_7(feats["rigids_t"][0])
+                atom37_t = all_atom.compute_backbone(
+                    rigids_t_no_batch, psi_pred_no_batch
+                )[0]
                 all_bb_prots.append(du.move_to_np(atom37_t))
-                final_psi_pred = psi_pred
+                final_psi_pred = psi_pred_no_batch
 
         # Flip trajectory so that it starts from t=0 (for visualization)
         flip = lambda x: np.flip(np.stack(x), (0,))
@@ -425,15 +435,28 @@ class SDEPathExplorationInference(InferenceMethod):
                                 + fixed_mask[..., None] * gt_trans_0
                             )
 
+                            # Remove batch dimension for backbone computation
+                            rigid_pred_no_batch = rigid_pred[0]  # Remove batch dim
+                            psi_pred_no_batch = psi_pred[0]  # Remove batch dim
+
                             atom37_0 = all_atom.compute_backbone(
-                                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                                ru.Rigid.from_tensor_7(rigid_pred_no_batch),
+                                psi_pred_no_batch,
                             )[0]
                             all_bb_0_pred.append(du.move_to_np(atom37_0))
-                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                            all_trans_0_pred.append(
+                                du.move_to_np(trans_pred_0[0])
+                            )  # Remove batch dim
 
-                            atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                            # Remove batch dimension for rigids_t as well
+                            rigids_t_no_batch = ru.Rigid.from_tensor_7(
+                                feats["rigids_t"][0]
+                            )
+                            atom37_t = all_atom.compute_backbone(
+                                rigids_t_no_batch, psi_pred_no_batch
+                            )[0]
                             all_bb_prots.append(du.move_to_np(atom37_t))
-                            final_psi_pred = psi_pred
+                            final_psi_pred = psi_pred_no_batch
                 else:
                     # Branching phase
                     new_samples = []
@@ -737,15 +760,28 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 + fixed_mask[..., None] * gt_trans_0
                             )
 
+                            # Remove batch dimension for backbone computation
+                            rigid_pred_no_batch = rigid_pred[0]  # Remove batch dim
+                            psi_pred_no_batch = psi_pred[0]  # Remove batch dim
+
                             atom37_0 = all_atom.compute_backbone(
-                                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                                ru.Rigid.from_tensor_7(rigid_pred_no_batch),
+                                psi_pred_no_batch,
                             )[0]
                             all_bb_0_pred.append(du.move_to_np(atom37_0))
-                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                            all_trans_0_pred.append(
+                                du.move_to_np(trans_pred_0[0])
+                            )  # Remove batch dim
 
-                            atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                            # Remove batch dimension for rigids_t as well
+                            rigids_t_no_batch = ru.Rigid.from_tensor_7(
+                                feats["rigids_t"][0]
+                            )
+                            atom37_t = all_atom.compute_backbone(
+                                rigids_t_no_batch, psi_pred_no_batch
+                            )[0]
                             all_bb_prots.append(du.move_to_np(atom37_t))
-                            final_psi_pred = psi_pred
+                            final_psi_pred = psi_pred_no_batch
                 else:
                     # Branching phase with divergence-free exploration
                     new_samples = []
