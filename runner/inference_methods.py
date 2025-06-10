@@ -547,6 +547,7 @@ class SDEPathExplorationInference(InferenceMethod):
             all_trans_0_pred = flip(all_trans_0_pred)
             all_bb_0_pred = flip(all_bb_0_pred)
 
+            breakpoint()
             # Return final sample in proper format (matching inference_fn)
             return {
                 "prot_traj": all_bb_prots,

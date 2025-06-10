@@ -231,6 +231,7 @@ class Sampler:
                 else:
                     sample_output = sample_result
 
+                breakpoint()
                 traj_paths = self.save_traj(
                     sample_output["prot_traj"],
                     sample_output["rigid_0_traj"],
