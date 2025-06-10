@@ -124,7 +124,7 @@ class InferenceMethod(ABC):
         min_t = self.sampler._fm_conf.min_t
 
         # Initialize trajectory collection
-        all_rigids = [du.move_to_np(copy.deepcopy(feats["rigids_t"]))]
+        all_rigids = [du.move_to_np(copy.deepcopy(feats["rigids_t"][0]))]
         all_bb_prots = []
         all_trans_0_pred = []
         all_bb_0_pred = []
@@ -159,7 +159,7 @@ class InferenceMethod(ABC):
                 feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
 
                 # Collect trajectory data
-                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()[0]))
 
                 # Calculate x0 prediction derived from vectorfield predictions
                 gt_trans_0 = feats["rigids_t"][..., 4:]
@@ -172,11 +172,11 @@ class InferenceMethod(ABC):
                 atom37_0 = all_atom.compute_backbone(
                     ru.Rigid.from_tensor_7(rigid_pred), psi_pred
                 )[0]
-                all_bb_0_pred.append(du.move_to_np(atom37_0))
-                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                all_bb_0_pred.append(du.move_to_np(atom37_0[0]))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0[0]))
 
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
-                all_bb_prots.append(du.move_to_np(atom37_t))
+                all_bb_prots.append(du.move_to_np(atom37_t[0]))
                 final_psi_pred = psi_pred
 
         # Flip trajectory so that it starts from t=0 (for visualization)
@@ -187,18 +187,13 @@ class InferenceMethod(ABC):
         all_bb_0_pred = flip(all_bb_0_pred)
 
         # Return final sample in proper format (matching inference_fn)
-        ret = {
+        return {
             "prot_traj": all_bb_prots,
             "rigid_traj": all_rigids,
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
         }
-
-        # Remove batch dimension like the original inference_fn does
-        return tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, ret
-        )
 
 
 class StandardInference(InferenceMethod):
@@ -329,9 +324,7 @@ class SDEPathExplorationInference(InferenceMethod):
             context,
         )
 
-        mapped_sample_out = tree.map_structure(lambda x: x[:, 0], sample_out)
-        breakpoint()
-        return mapped_sample_out
+        return sample_out
 
     def _sde_path_exploration_inference(
         self,
@@ -358,7 +351,7 @@ class SDEPathExplorationInference(InferenceMethod):
         current_samples = [sample_feats]
 
         # Initialize trajectory collection for final sample
-        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"][0]))]
         all_bb_prots = []
         all_trans_0_pred = []
         all_bb_0_pred = []
@@ -422,7 +415,7 @@ class SDEPathExplorationInference(InferenceMethod):
 
                         # Collect trajectory data for the main sample (first one)
                         if i == 0:
-                            all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+                            all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()[0]))
 
                             # Calculate x0 prediction derived from vectorfield predictions
                             gt_trans_0 = feats["rigids_t"][..., 4:]
@@ -435,11 +428,11 @@ class SDEPathExplorationInference(InferenceMethod):
                             atom37_0 = all_atom.compute_backbone(
                                 ru.Rigid.from_tensor_7(rigid_pred), psi_pred
                             )[0]
-                            all_bb_0_pred.append(du.move_to_np(atom37_0))
-                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                            all_bb_0_pred.append(du.move_to_np(atom37_0[0]))
+                            all_trans_0_pred.append(du.move_to_np(trans_pred_0[0]))
 
                             atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
-                            all_bb_prots.append(du.move_to_np(atom37_t))
+                            all_bb_prots.append(du.move_to_np(atom37_t[0]))
                             final_psi_pred = psi_pred
                 else:
                     # Branching phase
@@ -555,7 +548,7 @@ class SDEPathExplorationInference(InferenceMethod):
             all_bb_0_pred = flip(all_bb_0_pred)
 
             # Return final sample in proper format (matching inference_fn)
-            ret = {
+            return {
                 "prot_traj": all_bb_prots,
                 "rigid_traj": all_rigids,
                 "trans_traj": all_trans_0_pred,
@@ -564,11 +557,6 @@ class SDEPathExplorationInference(InferenceMethod):
                 ),
                 "rigid_0_traj": all_bb_0_pred,
             }
-
-            # Remove batch dimension like the original inference_fn does
-            return tree.map_structure(
-                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, ret
-            )
 
 
 class DivergenceFreeODEInference(InferenceMethod):
@@ -644,7 +632,7 @@ class DivergenceFreeODEInference(InferenceMethod):
             context,
         )
 
-        return tree.map_structure(lambda x: x[:, 0], sample_out)
+        return sample_out
 
     def _divergence_free_path_exploration_inference(
         self,
@@ -673,7 +661,7 @@ class DivergenceFreeODEInference(InferenceMethod):
         current_samples = [sample_feats]
 
         # Initialize trajectory collection for final sample
-        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"][0]))]
         all_bb_prots = []
         all_trans_0_pred = []
         all_bb_0_pred = []
@@ -739,7 +727,7 @@ class DivergenceFreeODEInference(InferenceMethod):
 
                         # Collect trajectory data for the main sample (first one)
                         if i == 0:
-                            all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+                            all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()[0]))
 
                             # Calculate x0 prediction derived from vectorfield predictions
                             gt_trans_0 = feats["rigids_t"][..., 4:]
@@ -752,11 +740,11 @@ class DivergenceFreeODEInference(InferenceMethod):
                             atom37_0 = all_atom.compute_backbone(
                                 ru.Rigid.from_tensor_7(rigid_pred), psi_pred
                             )[0]
-                            all_bb_0_pred.append(du.move_to_np(atom37_0))
-                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                            all_bb_0_pred.append(du.move_to_np(atom37_0[0]))
+                            all_trans_0_pred.append(du.move_to_np(trans_pred_0[0]))
 
                             atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
-                            all_bb_prots.append(du.move_to_np(atom37_t))
+                            all_bb_prots.append(du.move_to_np(atom37_t[0]))
                             final_psi_pred = psi_pred
                 else:
                     # Branching phase with divergence-free exploration
@@ -872,7 +860,7 @@ class DivergenceFreeODEInference(InferenceMethod):
             all_bb_0_pred = flip(all_bb_0_pred)
 
             # Return final sample in proper format (matching inference_fn)
-            ret = {
+            return {
                 "prot_traj": all_bb_prots,
                 "rigid_traj": all_rigids,
                 "trans_traj": all_trans_0_pred,
@@ -881,11 +869,6 @@ class DivergenceFreeODEInference(InferenceMethod):
                 ),
                 "rigid_0_traj": all_bb_0_pred,
             }
-
-            # Remove batch dimension like the original inference_fn does
-            return tree.map_structure(
-                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, ret
-            )
 
 
 def get_inference_method(
