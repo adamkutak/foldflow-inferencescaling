@@ -65,7 +65,6 @@ def write_prot_to_pdb(
     else:
         save_path = file_path
     with open(save_path, "w") as f:
-        breakpoint()
         if prot_pos.ndim == 4:
             for t, pos37 in enumerate(prot_pos):
                 atom37_mask = np.sum(np.abs(pos37), axis=-1) > 1e-7
