@@ -30,6 +30,7 @@ def score_si_linear(x, t_batch, u_t):
         # Reshape time for broadcasting with u_t shape
         one_minus_t = 1.0 - t_scalar
         t = t_scalar
+        breakpoint()
         return -((one_minus_t * u_t + x) / t)
 
 
