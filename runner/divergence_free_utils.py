@@ -27,8 +27,9 @@ def score_si_linear(x, t_batch, u_t):
         # limit t → 0  gives score = −x
         return -x
     else:
-        one_minus_t = 1.0 - t_batch.view(-1, *([1] * (x.ndim - 1)))
-        t = t_batch.view(-1, *([1] * (x.ndim - 1)))
+        # Reshape time for broadcasting with u_t shape
+        one_minus_t = 1.0 - t_scalar
+        t = t_scalar
         return -((one_minus_t * u_t + x) / t)
 
 
@@ -46,10 +47,12 @@ def divfree_swirl_si(x, t_batch, y, u_t, eps=1e-8):
     Returns:
         Divergence-free noise field
     """
-    eps_raw = torch.randn_like(x)
+    # Generate noise with same shape as velocity field
+    eps_raw = torch.randn_like(u_t)
     score = score_si_linear(x, t_batch, u_t)
 
-    dims = tuple(range(1, x.ndim))
+    # Compute projection to make noise divergence-free
+    dims = tuple(range(1, u_t.ndim))
     dot = (eps_raw * score).sum(dim=dims, keepdim=True)
     s_norm = torch.linalg.vector_norm(score, dim=dims, keepdim=True) + eps
     s_norm2 = s_norm.pow(2)
