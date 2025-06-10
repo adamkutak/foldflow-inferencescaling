@@ -172,11 +172,11 @@ class InferenceMethod(ABC):
                 atom37_0 = all_atom.compute_backbone(
                     ru.Rigid.from_tensor_7(rigid_pred), psi_pred
                 )[0]
-                all_bb_0_pred.append(du.move_to_np(atom37_0[0]))
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
                 all_trans_0_pred.append(du.move_to_np(trans_pred_0[0]))
 
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
-                all_bb_prots.append(du.move_to_np(atom37_t[0]))
+                all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
 
         # Flip trajectory so that it starts from t=0 (for visualization)
@@ -428,11 +428,11 @@ class SDEPathExplorationInference(InferenceMethod):
                             atom37_0 = all_atom.compute_backbone(
                                 ru.Rigid.from_tensor_7(rigid_pred), psi_pred
                             )[0]
-                            all_bb_0_pred.append(du.move_to_np(atom37_0[0]))
+                            all_bb_0_pred.append(du.move_to_np(atom37_0))
                             all_trans_0_pred.append(du.move_to_np(trans_pred_0[0]))
 
                             atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
-                            all_bb_prots.append(du.move_to_np(atom37_t[0]))
+                            all_bb_prots.append(du.move_to_np(atom37_t))
                             final_psi_pred = psi_pred
                 else:
                     # Branching phase
@@ -740,11 +740,11 @@ class DivergenceFreeODEInference(InferenceMethod):
                             atom37_0 = all_atom.compute_backbone(
                                 ru.Rigid.from_tensor_7(rigid_pred), psi_pred
                             )[0]
-                            all_bb_0_pred.append(du.move_to_np(atom37_0[0]))
+                            all_bb_0_pred.append(du.move_to_np(atom37_0))
                             all_trans_0_pred.append(du.move_to_np(trans_pred_0[0]))
 
                             atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
-                            all_bb_prots.append(du.move_to_np(atom37_t[0]))
+                            all_bb_prots.append(du.move_to_np(atom37_t))
                             final_psi_pred = psi_pred
                 else:
                     # Branching phase with divergence-free exploration
