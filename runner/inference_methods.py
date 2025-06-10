@@ -16,6 +16,7 @@ import torch
 import tree
 from typing import Optional, Dict, Any, Callable
 from abc import ABC, abstractmethod
+import copy
 
 from foldflow.data import utils as du
 from foldflow.data import residue_constants
@@ -122,6 +123,13 @@ class InferenceMethod(ABC):
         device = feats["rigids_t"].device
         min_t = self.sampler._fm_conf.min_t
 
+        # Initialize trajectory collection
+        all_rigids = [du.move_to_np(copy.deepcopy(feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
         with torch.no_grad():
             for t in remaining_steps:
                 feats = self.sampler.exp._set_t_feats(
@@ -131,6 +139,8 @@ class InferenceMethod(ABC):
 
                 rot_vectorfield = model_out["rot_vectorfield"]
                 trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
 
                 fixed_mask = feats["fixed_mask"] * feats["res_mask"]
                 flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
@@ -148,10 +158,44 @@ class InferenceMethod(ABC):
 
                 feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
 
-        # Generate final sample
-        return self.sampler.exp.inference_fn(
-            feats, num_t=1, min_t=min_t, aux_traj=True, noise_scale=1.0, context=context
-        )
+                # Collect trajectory data
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Calculate x0 prediction derived from vectorfield predictions
+                gt_trans_0 = feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                from foldflow.models.components import all_atom
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectory so that it starts from t=0 (for visualization)
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        # Return final sample in proper format (matching inference_fn)
+        return {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
 
 
 class StandardInference(InferenceMethod):
@@ -308,6 +352,13 @@ class SDEPathExplorationInference(InferenceMethod):
 
         current_samples = [sample_feats]
 
+        # Initialize trajectory collection for final sample
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
         with torch.no_grad():
             for step_idx, t in enumerate(reverse_steps):
                 # Simple branching condition: branch if t >= branch_start_time and t is multiple of branch_interval
@@ -329,6 +380,8 @@ class SDEPathExplorationInference(InferenceMethod):
 
                         rot_vectorfield = model_out["rot_vectorfield"]
                         trans_vectorfield = model_out["trans_vectorfield"]
+                        rigid_pred = model_out["rigids"]
+                        psi_pred = model_out["psi"]
 
                         # Add SDE noise at every step
                         noise_rot = (
@@ -361,6 +414,30 @@ class SDEPathExplorationInference(InferenceMethod):
 
                         feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
                         current_samples[i] = feats
+
+                        # Collect trajectory data for the main sample (first one)
+                        if i == 0:
+                            all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                            # Calculate x0 prediction derived from vectorfield predictions
+                            gt_trans_0 = feats["rigids_t"][..., 4:]
+                            pred_trans_0 = rigid_pred[..., 4:]
+                            trans_pred_0 = (
+                                flow_mask[..., None] * pred_trans_0
+                                + fixed_mask[..., None] * gt_trans_0
+                            )
+
+                            from foldflow.models.components import all_atom
+
+                            atom37_0 = all_atom.compute_backbone(
+                                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                            )[0]
+                            all_bb_0_pred.append(du.move_to_np(atom37_0))
+                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                            atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                            all_bb_prots.append(du.move_to_np(atom37_t))
+                            final_psi_pred = psi_pred
                 else:
                     # Branching phase
                     new_samples = []
@@ -456,31 +533,34 @@ class SDEPathExplorationInference(InferenceMethod):
                 # Evaluate all final samples and pick best
                 final_scores = []
                 for feats in current_samples:
-                    sample_out = self.sampler.exp.inference_fn(
-                        feats,
-                        num_t=1,
-                        min_t=min_t,
-                        aux_traj=True,
-                        noise_scale=1.0,
-                        context=context,
-                    )
+                    # Create a simple trajectory for evaluation
+                    sample_out = {
+                        "prot_traj": feats["rigids_t"],
+                        "rigid_0_traj": feats["rigids_t"],
+                    }
                     score = score_fn(sample_out, sample_length)
                     final_scores.append(score)
 
                 best_idx = np.argmax(final_scores)
                 final_sample = current_samples[best_idx]
 
-            # Generate final output
-            sample_out = self.sampler.exp.inference_fn(
-                final_sample,
-                num_t=num_t,
-                min_t=min_t,
-                aux_traj=True,
-                noise_scale=1.0,
-                context=context,
-            )
+            # Flip trajectory so that it starts from t=0 (for visualization)
+            flip = lambda x: np.flip(np.stack(x), (0,))
+            all_bb_prots = flip(all_bb_prots)
+            all_rigids = flip(all_rigids)
+            all_trans_0_pred = flip(all_trans_0_pred)
+            all_bb_0_pred = flip(all_bb_0_pred)
 
-            return sample_out
+            # Return final sample in proper format (matching inference_fn)
+            return {
+                "prot_traj": all_bb_prots,
+                "rigid_traj": all_rigids,
+                "trans_traj": all_trans_0_pred,
+                "psi_pred": (
+                    final_psi_pred[None] if final_psi_pred is not None else None
+                ),
+                "rigid_0_traj": all_bb_0_pred,
+            }
 
 
 class DivergenceFreeODEInference(InferenceMethod):
@@ -584,6 +664,13 @@ class DivergenceFreeODEInference(InferenceMethod):
 
         current_samples = [sample_feats]
 
+        # Initialize trajectory collection for final sample
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
         with torch.no_grad():
             for step_idx, t in enumerate(reverse_steps):
                 # Simple branching condition: branch if t >= branch_start_time and t is multiple of branch_interval
@@ -605,6 +692,8 @@ class DivergenceFreeODEInference(InferenceMethod):
 
                         rot_vectorfield = model_out["rot_vectorfield"]
                         trans_vectorfield = model_out["trans_vectorfield"]
+                        rigid_pred = model_out["rigids"]
+                        psi_pred = model_out["psi"]
 
                         # Add divergence-free noise at every step
                         rigids_tensor = feats["rigids_t"]
@@ -639,6 +728,30 @@ class DivergenceFreeODEInference(InferenceMethod):
 
                         feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
                         current_samples[i] = feats
+
+                        # Collect trajectory data for the main sample (first one)
+                        if i == 0:
+                            all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                            # Calculate x0 prediction derived from vectorfield predictions
+                            gt_trans_0 = feats["rigids_t"][..., 4:]
+                            pred_trans_0 = rigid_pred[..., 4:]
+                            trans_pred_0 = (
+                                flow_mask[..., None] * pred_trans_0
+                                + fixed_mask[..., None] * gt_trans_0
+                            )
+
+                            from foldflow.models.components import all_atom
+
+                            atom37_0 = all_atom.compute_backbone(
+                                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                            )[0]
+                            all_bb_0_pred.append(du.move_to_np(atom37_0))
+                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                            atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                            all_bb_prots.append(du.move_to_np(atom37_t))
+                            final_psi_pred = psi_pred
                 else:
                     # Branching phase with divergence-free exploration
                     new_samples = []
@@ -734,31 +847,34 @@ class DivergenceFreeODEInference(InferenceMethod):
                 # Evaluate all final samples and pick best
                 final_scores = []
                 for feats in current_samples:
-                    sample_out = self.sampler.exp.inference_fn(
-                        feats,
-                        num_t=1,
-                        min_t=min_t,
-                        aux_traj=True,
-                        noise_scale=1.0,
-                        context=context,
-                    )
+                    # Create a simple trajectory for evaluation
+                    sample_out = {
+                        "prot_traj": feats["rigids_t"],
+                        "rigid_0_traj": feats["rigids_t"],
+                    }
                     score = score_fn(sample_out, sample_length)
                     final_scores.append(score)
 
                 best_idx = np.argmax(final_scores)
                 final_sample = current_samples[best_idx]
 
-            # Generate final output
-            sample_out = self.sampler.exp.inference_fn(
-                final_sample,
-                num_t=num_t,
-                min_t=min_t,
-                aux_traj=True,
-                noise_scale=1.0,
-                context=context,
-            )
+            # Flip trajectory so that it starts from t=0 (for visualization)
+            flip = lambda x: np.flip(np.stack(x), (0,))
+            all_bb_prots = flip(all_bb_prots)
+            all_rigids = flip(all_rigids)
+            all_trans_0_pred = flip(all_trans_0_pred)
+            all_bb_0_pred = flip(all_bb_0_pred)
 
-            return sample_out
+            # Return final sample in proper format (matching inference_fn)
+            return {
+                "prot_traj": all_bb_prots,
+                "rigid_traj": all_rigids,
+                "trans_traj": all_trans_0_pred,
+                "psi_pred": (
+                    final_psi_pred[None] if final_psi_pred is not None else None
+                ),
+                "rigid_0_traj": all_bb_0_pred,
+            }
 
 
 def get_inference_method(
