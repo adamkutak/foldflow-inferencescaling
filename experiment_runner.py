@@ -213,19 +213,7 @@ class ExperimentRunner:
         # 1. Baseline: Standard sampling
         experiments.append({"method": "standard", "config": {}})
 
-        # 2. Best-of-N with different N values
-        for n_branches in self.args.branch_counts:
-            experiments.append(
-                {
-                    "method": "best_of_n",
-                    "config": {
-                        "n_samples": n_branches,
-                        "selector": self.args.scoring_function,
-                    },
-                }
-            )
-
-        # 3. SDE path exploration with different branch counts
+        # SDE path exploration with different branch counts
         for n_branches in self.args.branch_counts:
             experiments.append(
                 {
@@ -241,7 +229,7 @@ class ExperimentRunner:
                 }
             )
 
-        # 4. Divergence-free ODE with different branch counts
+        # Divergence-free ODE with different branch counts
         for n_branches in self.args.branch_counts:
             experiments.append(
                 {
@@ -253,6 +241,18 @@ class ExperimentRunner:
                         "selector": self.args.scoring_function,
                         "branch_start_time": 0.0,
                         "branch_interval": self.args.branch_interval,
+                    },
+                }
+            )
+
+        # Best-of-N with different N values
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "best_of_n",
+                    "config": {
+                        "n_samples": n_branches,
+                        "selector": self.args.scoring_function,
                     },
                 }
             )
