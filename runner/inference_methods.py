@@ -918,7 +918,6 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 new_samples.append(branch_feats)
 
                     current_samples = new_samples
-                    break  # Exit the timestep loop after branching
 
         # Return the final sample from the best branch
         if current_samples:
