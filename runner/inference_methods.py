@@ -972,6 +972,312 @@ class DivergenceFreeODEInference(InferenceMethod):
         )
 
 
+class SDESimpleInference(InferenceMethod):
+    """Simple SDE inference with noise but no branching."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using SDE with noise but no branching."""
+        noise_scale = self.config.get("noise_scale", 0.05)
+
+        self._log.info(f"Running simple SDE sampling with noise_scale={noise_scale}")
+
+        # Initialize features (same as standard method)
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        # Run simple SDE sampling
+        sample_out = self._simple_sde_inference(init_feats, noise_scale, context)
+
+        # Remove batch dimension like _base_sample does
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
+        )
+
+    def _simple_sde_inference(self, data_init, noise_scale, context):
+        """Simple SDE sampling with noise at every step."""
+        sample_feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
+        )
+        device = sample_feats["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Initialize trajectory collection
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
+        with torch.no_grad():
+            for t in reverse_steps:
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(sample_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                # Add SDE noise
+                noise_rot = (
+                    torch.randn_like(rot_vectorfield) * noise_scale * np.sqrt(dt)
+                )
+                noise_trans = (
+                    torch.randn_like(trans_vectorfield) * noise_scale * np.sqrt(dt)
+                )
+
+                rot_vectorfield = rot_vectorfield + noise_rot
+                trans_vectorfield = trans_vectorfield + noise_trans
+
+                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
+                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                # Collect trajectory data
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Calculate x0 prediction
+                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectory so that it starts from t=0
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        return {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
+
+
+class DivergenceFreeSimpleInference(InferenceMethod):
+    """Simple divergence-free inference with noise but no branching."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using divergence-free noise but no branching."""
+        lambda_div = self.config.get("lambda_div", 0.2)
+
+        self._log.info(
+            f"Running simple divergence-free sampling with lambda_div={lambda_div}"
+        )
+
+        # Initialize features (same as standard method)
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        # Run simple divergence-free sampling
+        sample_out = self._simple_divergence_free_inference(
+            init_feats, lambda_div, context
+        )
+
+        # Remove batch dimension like _base_sample does
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
+        )
+
+    def _simple_divergence_free_inference(self, data_init, lambda_div, context):
+        """Simple divergence-free sampling with noise at every step."""
+        sample_feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
+        )
+        device = sample_feats["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Initialize trajectory collection
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
+        with torch.no_grad():
+            for t in reverse_steps:
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(sample_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                # Add divergence-free noise
+                rigids_tensor = sample_feats["rigids_t"]
+                t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
+
+                # Extract rotation matrices and translations
+                rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
+                rot_mats = rigid_obj.get_rots().get_rot_mats()  # [B, N, 3, 3]
+                trans_vecs = rigid_obj.get_trans()  # [B, N, 3]
+
+                # Generate divergence-free noise
+                rot_divfree_noise = divfree_swirl_si(
+                    rot_mats, t_batch, None, rot_vectorfield
+                )
+                trans_divfree_noise = divfree_swirl_si(
+                    trans_vecs, t_batch, None, trans_vectorfield
+                )
+
+                # Add divergence-free noise to vector fields
+                rot_vectorfield = rot_vectorfield + lambda_div * rot_divfree_noise
+                trans_vectorfield = trans_vectorfield + lambda_div * trans_divfree_noise
+
+                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
+                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                # Collect trajectory data
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Calculate x0 prediction
+                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectory so that it starts from t=0
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        return {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
+
+
 def get_inference_method(
     method_name: str, sampler, config: Dict[str, Any]
 ) -> InferenceMethod:
@@ -981,6 +1287,8 @@ def get_inference_method(
         "best_of_n": BestOfNInference,
         "sde_path_exploration": SDEPathExplorationInference,
         "divergence_free_ode": DivergenceFreeODEInference,
+        "sde_simple": SDESimpleInference,
+        "divergence_free_simple": DivergenceFreeSimpleInference,
     }
 
     if method_name not in methods:
