@@ -450,7 +450,7 @@ def main():
         "--branch_counts",
         type=int,
         nargs="+",
-        default=[2, 4, 8],
+        default=[2, 4],
         help="List of branch counts to use for experiments (default: [2, 4, 8])",
     )
 
