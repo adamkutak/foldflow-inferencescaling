@@ -394,7 +394,7 @@ def main():
         "--noise_scales",
         type=float,
         nargs="+",
-        default=[0.01, 0.02, 0.05, 0.1, 0.2],
+        default=[0.02, 0.05, 0.1, 0.2],
         help="List of noise scales to test for SDE method (default: [0.01, 0.02, 0.05, 0.1, 0.2])",
     )
 
