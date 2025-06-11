@@ -698,8 +698,9 @@ class DivergenceFreeODEInference(InferenceMethod):
                             (rigids_tensor.shape[0],), t, device=device
                         )
 
-                        # Extract proper rotation matrices and translations from SE(3) representation
-                        rot_mats, trans_vecs = extract_trans_rots_mat(rigids_tensor)
+                        # Convert SE(3) tensor to Rigid object and extract proper rotation matrices and translations
+                        rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
+                        rot_mats, trans_vecs = extract_trans_rots_mat(rigid_obj)
 
                         # Generate divergence-free noise for rotation field
                         rot_divfree_noise = divfree_swirl_si(
@@ -790,8 +791,9 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 (rigids_tensor.shape[0],), t, device=device
                             )
 
-                            # Extract proper rotation matrices and translations from SE(3) representation
-                            rot_mats, trans_vecs = extract_trans_rots_mat(rigids_tensor)
+                            # Convert SE(3) tensor to Rigid object and extract proper rotation matrices and translations
+                            rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
+                            rot_mats, trans_vecs = extract_trans_rots_mat(rigid_obj)
 
                             # Generate divergence-free noise for rotation field
                             rot_divfree_noise = divfree_swirl_si(
