@@ -21,7 +21,6 @@ from abc import ABC, abstractmethod
 from foldflow.data import utils as du
 from foldflow.data import residue_constants, all_atom
 from openfold.utils import rigid_utils as ru
-from foldflow.utils.rigid_helpers import extract_trans_rots_mat
 from tools.analysis import metrics
 from runner.divergence_free_utils import divfree_swirl_si
 
@@ -698,9 +697,10 @@ class DivergenceFreeODEInference(InferenceMethod):
                             (rigids_tensor.shape[0],), t, device=device
                         )
 
-                        # Convert SE(3) tensor to Rigid object and extract proper rotation matrices and translations
+                        # Extract rotation matrices and translations directly as torch tensors (stay on GPU)
                         rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
-                        rot_mats, trans_vecs = extract_trans_rots_mat(rigid_obj)
+                        rot_mats = rigid_obj.get_rots().get_rot_mats()  # [B, N, 3, 3]
+                        trans_vecs = rigid_obj.get_trans()  # [B, N, 3]
 
                         # Generate divergence-free noise for rotation field
                         rot_divfree_noise = divfree_swirl_si(
@@ -791,9 +791,12 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 (rigids_tensor.shape[0],), t, device=device
                             )
 
-                            # Convert SE(3) tensor to Rigid object and extract proper rotation matrices and translations
+                            # Extract rotation matrices and translations directly as torch tensors (stay on GPU)
                             rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
-                            rot_mats, trans_vecs = extract_trans_rots_mat(rigid_obj)
+                            rot_mats = (
+                                rigid_obj.get_rots().get_rot_mats()
+                            )  # [B, N, 3, 3]
+                            trans_vecs = rigid_obj.get_trans()  # [B, N, 3]
 
                             # Generate divergence-free noise for rotation field
                             rot_divfree_noise = divfree_swirl_si(
