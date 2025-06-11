@@ -421,14 +421,14 @@ def main():
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.4,
+        default=0.1,
         help="Lambda for divergence-free vector fields",
     )
 
     parser.add_argument(
         "--branch_interval",
         type=float,
-        default=0.1,
+        default=0.05,
         help="Time interval between branches (0.0 = every timestep, 0.1 = every 0.1 time units)",
     )
 
