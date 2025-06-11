@@ -21,6 +21,13 @@ def score_si_linear(x, t_batch, u_t):
     Returns:
         Score function
     """
+    # Ensure all tensors are on the same device
+    device = u_t.device
+    if hasattr(x, "device") and x.device != device:
+        x = x.to(device)
+    if hasattr(t_batch, "device") and t_batch.device != device:
+        t_batch = t_batch.to(device)
+
     t_scalar = t_batch[0].item()
 
     if t_scalar == 0.0:
@@ -47,6 +54,13 @@ def divfree_swirl_si(x, t_batch, y, u_t, eps=1e-8):
     Returns:
         Divergence-free noise field
     """
+    # Ensure all tensors are on the same device as u_t
+    device = u_t.device
+    if hasattr(x, "device") and x.device != device:
+        x = x.to(device)
+    if hasattr(t_batch, "device") and t_batch.device != device:
+        t_batch = t_batch.to(device)
+
     # Generate noise with same shape as velocity field
     eps_raw = torch.randn_like(u_t)
     score = score_si_linear(x, t_batch, u_t)
