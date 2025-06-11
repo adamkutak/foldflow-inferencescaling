@@ -211,7 +211,7 @@ class ExperimentRunner:
         experiments = []
 
         # 1. Baseline: Standard sampling
-        experiments.append({"method": "standard", "config": {}})
+        # experiments.append({"method": "standard", "config": {}})
 
         # SDE path exploration with different branch counts
         for n_branches in self.args.branch_counts:
