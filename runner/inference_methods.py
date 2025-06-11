@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from foldflow.data import utils as du
 from foldflow.data import residue_constants, all_atom
 from openfold.utils import rigid_utils as ru
+from foldflow.utils.rigid_helpers import extract_trans_rots_mat
 from tools.analysis import metrics
 from runner.divergence_free_utils import divfree_swirl_si
 
@@ -697,11 +698,12 @@ class DivergenceFreeODEInference(InferenceMethod):
                             (rigids_tensor.shape[0],), t, device=device
                         )
 
+                        # Extract proper rotation matrices and translations from SE(3) representation
+                        rot_mats, trans_vecs = extract_trans_rots_mat(rigids_tensor)
+
                         # Generate divergence-free noise for rotation field
                         rot_divfree_noise = divfree_swirl_si(
-                            rigids_tensor[
-                                ..., :3
-                            ],  # Use first 3 components for rotation
+                            rot_mats,  # [B, N, 3, 3] rotation matrices
                             t_batch,
                             None,  # y not used
                             rot_vectorfield,
@@ -709,7 +711,7 @@ class DivergenceFreeODEInference(InferenceMethod):
 
                         # Generate divergence-free noise for translation field
                         trans_divfree_noise = divfree_swirl_si(
-                            rigids_tensor[..., 4:],  # Translation components
+                            trans_vecs,  # [B, N, 3] translation vectors
                             t_batch,
                             None,  # y not used
                             trans_vectorfield,
@@ -788,12 +790,12 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 (rigids_tensor.shape[0],), t, device=device
                             )
 
-                            breakpoint()
+                            # Extract proper rotation matrices and translations from SE(3) representation
+                            rot_mats, trans_vecs = extract_trans_rots_mat(rigids_tensor)
+
                             # Generate divergence-free noise for rotation field
                             rot_divfree_noise = divfree_swirl_si(
-                                rigids_tensor[
-                                    ..., :3
-                                ],  # Use first 3 components for rotation
+                                rot_mats,  # [B, N, 3, 3] rotation matrices
                                 t_batch,
                                 None,  # y not used
                                 rot_vectorfield,
@@ -801,7 +803,7 @@ class DivergenceFreeODEInference(InferenceMethod):
 
                             # Generate divergence-free noise for translation field
                             trans_divfree_noise = divfree_swirl_si(
-                                rigids_tensor[..., 4:],  # Translation components
+                                trans_vecs,  # [B, N, 3] translation vectors
                                 t_batch,
                                 None,  # y not used
                                 trans_vectorfield,
@@ -838,70 +840,111 @@ class DivergenceFreeODEInference(InferenceMethod):
                             )
 
                             branch_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-                            branches.append(branch_feats)
 
-                        # Simulate branches to completion deterministically and evaluate
-                        branch_scores = []
-                        for branch_feats in branches:
-                            # Simulate to completion deterministically
-                            completed_sample = self._simulate_to_completion(
-                                branch_feats,
-                                t,
-                                dt,
-                                reverse_steps[step_idx + 1 :],
-                                context,
-                            )
+                            # Simulate this branch to completion
+                            remaining_steps = reverse_steps[step_idx + 1 :]
+                            if len(remaining_steps) > 0:
+                                branch_result = self._simulate_to_completion(
+                                    branch_feats, t, dt, remaining_steps, context
+                                )
+                                branches.append((branch_result, branch_feats))
+                            else:
+                                # This is the final step
+                                rigid_pred = model_out["rigids"]
+                                psi_pred = model_out["psi"]
 
-                            # Evaluate
-                            score = score_fn(completed_sample, sample_length)
-                            branch_scores.append(score)
+                                fixed_mask = (
+                                    branch_feats["fixed_mask"]
+                                    * branch_feats["res_mask"]
+                                )
+                                flow_mask = (
+                                    1 - branch_feats["fixed_mask"]
+                                ) * branch_feats["res_mask"]
 
-                        # Select best branches
-                        branch_scores = torch.tensor(branch_scores)
-                        top_k_indices = torch.topk(
-                            branch_scores, k=min(num_keep, len(branches))
-                        )[1]
+                                gt_trans_0 = branch_feats["rigids_t"][..., 4:]
+                                pred_trans_0 = rigid_pred[..., 4:]
+                                trans_pred_0 = (
+                                    flow_mask[..., None] * pred_trans_0
+                                    + fixed_mask[..., None] * gt_trans_0
+                                )
 
-                        for idx in top_k_indices:
-                            new_samples.append(branches[idx])
+                                atom37_0 = all_atom.compute_backbone(
+                                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                                )[0]
+
+                                final_result = {
+                                    "prot_traj": np.array([du.move_to_np(atom37_0[0])]),
+                                    "rigid_traj": np.array(
+                                        [du.move_to_np(rigids_t.to_tensor_7()[0])]
+                                    ),
+                                    "trans_traj": np.array(
+                                        [du.move_to_np(trans_pred_0[0])]
+                                    ),
+                                    "psi_pred": (
+                                        psi_pred[None] if psi_pred is not None else None
+                                    ),
+                                    "rigid_0_traj": np.array(
+                                        [du.move_to_np(atom37_0[0])]
+                                    ),
+                                }
+                                branches.append((final_result, branch_feats))
+
+                        # Score all branches and keep the best ones
+                        if branches:
+                            scored_branches = []
+                            for branch_result, branch_feats in branches:
+                                try:
+                                    score = score_fn(branch_result, sample_length)
+                                    scored_branches.append(
+                                        (score, branch_result, branch_feats)
+                                    )
+                                except Exception as e:
+                                    self._log.warning(f"Failed to score branch: {e}")
+                                    scored_branches.append(
+                                        (-float("inf"), branch_result, branch_feats)
+                                    )
+
+                            # Sort by score (descending) and keep the best
+                            scored_branches.sort(key=lambda x: x[0], reverse=True)
+                            best_branches = scored_branches[:num_keep]
+
+                            # Update current samples with the best branches
+                            for _, branch_result, branch_feats in best_branches:
+                                new_samples.append(branch_feats)
 
                     current_samples = new_samples
+                    break  # Exit the timestep loop after branching
 
-            # Return best final sample
-            if len(current_samples) == 1:
-                final_sample = current_samples[0]
-            else:
-                # Evaluate all final samples and pick best
-                final_scores = []
-                for feats in current_samples:
-                    # Create a simple trajectory for evaluation
-                    sample_out = {
-                        "prot_traj": feats["rigids_t"],
-                        "rigid_0_traj": feats["rigids_t"],
-                    }
-                    score = score_fn(sample_out, sample_length)
-                    final_scores.append(score)
+        # Return the final sample from the best branch
+        if current_samples:
+            final_feats = current_samples[0]
+        else:
+            final_feats = sample_feats
 
-                best_idx = np.argmax(final_scores)
-                final_sample = current_samples[best_idx]
+        # Complete the simulation if we haven't reached the end
+        remaining_steps = [t for t in reverse_steps if t < branch_start_time]
+        if remaining_steps and len(all_bb_prots) == 0:
+            # We branched early, need to complete the trajectory
+            final_result = self._simulate_to_completion(
+                final_feats, reverse_steps[0], dt, remaining_steps, context
+            )
+            return final_result
 
-            # Flip trajectory so that it starts from t=0 (for visualization)
-            flip = lambda x: np.flip(np.stack(x), (0,))
-            all_bb_prots = flip(all_bb_prots)
-            all_rigids = flip(all_rigids)
-            all_trans_0_pred = flip(all_trans_0_pred)
-            all_bb_0_pred = flip(all_bb_0_pred)
+        # Flip trajectory so that it starts from t=0 (for visualization)
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
 
-            # Return final sample in proper format (matching inference_fn)
-            return {
-                "prot_traj": all_bb_prots,
-                "rigid_traj": all_rigids,
-                "trans_traj": all_trans_0_pred,
-                "psi_pred": (
-                    final_psi_pred[None] if final_psi_pred is not None else None
-                ),
-                "rigid_0_traj": all_bb_0_pred,
-            }
+        # Return final sample in proper format (matching inference_fn)
+        return {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
 
 
 def get_inference_method(
