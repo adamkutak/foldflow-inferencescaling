@@ -214,7 +214,7 @@ class ExperimentRunner:
         experiments.append({"method": "standard", "config": {}})
 
         # 2. Best-of-N with different N values
-        for n_branches in [2, 4, 8]:
+        for n_branches in self.args.branch_counts:
             experiments.append(
                 {
                     "method": "best_of_n",
@@ -226,7 +226,7 @@ class ExperimentRunner:
             )
 
         # 3. SDE path exploration with different branch counts
-        for n_branches in [2, 4, 8]:
+        for n_branches in self.args.branch_counts:
             experiments.append(
                 {
                     "method": "sde_path_exploration",
@@ -242,7 +242,7 @@ class ExperimentRunner:
             )
 
         # 4. Divergence-free ODE with different branch counts
-        for n_branches in [2, 4, 8]:
+        for n_branches in self.args.branch_counts:
             experiments.append(
                 {
                     "method": "divergence_free_ode",
@@ -428,7 +428,7 @@ def main():
     parser.add_argument(
         "--branch_interval",
         type=float,
-        default=0.2,
+        default=0.1,
         help="Time interval between branches (0.0 = every timestep, 0.1 = every 0.1 time units)",
     )
 
@@ -446,6 +446,14 @@ def main():
         help="Base directory for experiment outputs",
     )
 
+    parser.add_argument(
+        "--branch_counts",
+        type=int,
+        nargs="+",
+        default=[2, 4, 8],
+        help="List of branch counts to use for experiments (default: [2, 4, 8])",
+    )
+
     args = parser.parse_args()
 
     print("Starting Inference Scaling Experiments")
@@ -459,6 +467,7 @@ def main():
     print(
         f"  GPU ID: {args.gpu_id if args.gpu_id is not None else 'from config (default: 1)'}"
     )
+    print(f"  Branch counts: {args.branch_counts}")
     print()
 
     # Create and run experiments
