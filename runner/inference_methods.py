@@ -697,6 +697,7 @@ class DivergenceFreeODEInference(InferenceMethod):
                             (rigids_tensor.shape[0],), t, device=device
                         )
 
+                        breakpoint()
                         # Generate divergence-free noise for rotation field
                         rot_divfree_noise = divfree_swirl_si(
                             rigids_tensor[
