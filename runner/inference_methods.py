@@ -477,12 +477,6 @@ class SDEPathExplorationInference(InferenceMethod):
                 if not should_branch:
                     # Regular flow with SDE noise at every step
                     for i, feats in enumerate(current_samples):
-                        # CRITICAL FIX: Properly clone the features to avoid reference sharing
-                        feats = tree.map_structure(
-                            lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
-                            feats,
-                        )
-
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
                         )
@@ -666,6 +660,22 @@ class SDEPathExplorationInference(InferenceMethod):
                                 self._log.info(
                                     f"      Branch {branch_idx}: score = {score:.4f}"
                                 )
+
+                                # DEBUGGING: Also evaluate the branch state itself to see if there's a difference
+                                if step_idx == 0:  # Only for first branch to avoid spam
+                                    branch_eval_sample = {
+                                        "prot_traj": branch_feats["rigids_t"],
+                                        "rigid_0_traj": branch_feats["rigids_t"],
+                                    }
+                                    branch_score = score_fn(
+                                        branch_eval_sample, sample_length
+                                    )
+                                    self._log.info(
+                                        f"      Branch {branch_idx} state score (before completion): {branch_score:.4f}"
+                                    )
+                                    self._log.info(
+                                        f"      Score difference (completion - branch): {score - branch_score:.4f}"
+                                    )
 
                             except Exception as e:
                                 self._log.error(
@@ -972,12 +982,6 @@ class DivergenceFreeODEInference(InferenceMethod):
                 if not should_branch:
                     # Regular flow with divergence-free noise at every step
                     for i, feats in enumerate(current_samples):
-                        # CRITICAL FIX: Properly clone the features to avoid reference sharing
-                        feats = tree.map_structure(
-                            lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
-                            feats,
-                        )
-
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
                         )
