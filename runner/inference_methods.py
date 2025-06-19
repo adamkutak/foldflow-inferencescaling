@@ -708,6 +708,74 @@ class SDEPathExplorationInference(InferenceMethod):
                                 f"    Added branch {idx} state to continue from"
                             )
 
+                        # CRITICAL FIX: Collect trajectory data for the selected branch
+                        if len(top_k_indices) > 0:
+                            # Use the first (best) selected branch for trajectory collection
+                            best_branch_idx = top_k_indices[0]
+                            best_branch_feats = branches[best_branch_idx]
+
+                            self._log.debug(
+                                f"    Collecting trajectory data from selected branch {best_branch_idx}"
+                            )
+
+                            # We need to reconstruct the model output for this branch to get the predictions
+                            with torch.no_grad():
+                                best_branch_feats_eval = tree.map_structure(
+                                    lambda x: (
+                                        x.clone() if torch.is_tensor(x) else x.copy()
+                                    ),
+                                    best_branch_feats,
+                                )
+                                best_branch_feats_eval = self.sampler.exp._set_t_feats(
+                                    best_branch_feats_eval,
+                                    t,
+                                    torch.ones((1,)).to(device),
+                                )
+                                model_out = self.sampler.model(best_branch_feats_eval)
+
+                                rigid_pred = model_out["rigids"]
+                                psi_pred = model_out["psi"]
+
+                                # Collect trajectory data for this branching step
+                                all_rigids.append(
+                                    du.move_to_np(best_branch_feats["rigids_t"])
+                                )
+
+                                # Calculate x0 prediction derived from vectorfield predictions
+                                fixed_mask = (
+                                    best_branch_feats["fixed_mask"]
+                                    * best_branch_feats["res_mask"]
+                                )
+                                flow_mask = (
+                                    1 - best_branch_feats["fixed_mask"]
+                                ) * best_branch_feats["res_mask"]
+
+                                gt_trans_0 = best_branch_feats["rigids_t"][..., 4:]
+                                pred_trans_0 = rigid_pred[..., 4:]
+                                trans_pred_0 = (
+                                    flow_mask[..., None] * pred_trans_0
+                                    + fixed_mask[..., None] * gt_trans_0
+                                )
+
+                                atom37_0 = all_atom.compute_backbone(
+                                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                                )[0]
+                                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                                atom37_t = all_atom.compute_backbone(
+                                    ru.Rigid.from_tensor_7(
+                                        best_branch_feats["rigids_t"]
+                                    ),
+                                    psi_pred,
+                                )[0]
+                                all_bb_prots.append(du.move_to_np(atom37_t))
+                                final_psi_pred = psi_pred
+
+                                self._log.debug(
+                                    f"    Branching step {step_idx}: collected trajectory frame from selected branch, total frames = {len(all_bb_prots)}"
+                                )
+
                     current_samples = new_samples
 
             self._log.info(f"SDE PATH EXPLORATION COMPLETE")
@@ -1171,6 +1239,79 @@ class DivergenceFreeODEInference(InferenceMethod):
                             # Update current samples with the best branches
                             for _, branch_result, branch_feats in best_branches:
                                 new_samples.append(branch_feats)
+
+                            # CRITICAL FIX: Collect trajectory data for the selected branch (same as SDE method)
+                            if best_branches:
+                                # Use the first (best) selected branch for trajectory collection
+                                _, _, best_branch_feats = best_branches[0]
+
+                                self._log.debug(
+                                    f"    Collecting trajectory data from best divergence-free branch"
+                                )
+
+                                # We need to reconstruct the model output for this branch to get the predictions
+                                with torch.no_grad():
+                                    best_branch_feats_eval = tree.map_structure(
+                                        lambda x: (
+                                            x.clone()
+                                            if torch.is_tensor(x)
+                                            else x.copy()
+                                        ),
+                                        best_branch_feats,
+                                    )
+                                    best_branch_feats_eval = (
+                                        self.sampler.exp._set_t_feats(
+                                            best_branch_feats_eval,
+                                            t,
+                                            torch.ones((1,)).to(device),
+                                        )
+                                    )
+                                    model_out = self.sampler.model(
+                                        best_branch_feats_eval
+                                    )
+
+                                    rigid_pred = model_out["rigids"]
+                                    psi_pred = model_out["psi"]
+
+                                    # Collect trajectory data for this branching step
+                                    all_rigids.append(
+                                        du.move_to_np(best_branch_feats["rigids_t"])
+                                    )
+
+                                    # Calculate x0 prediction derived from vectorfield predictions
+                                    fixed_mask = (
+                                        best_branch_feats["fixed_mask"]
+                                        * best_branch_feats["res_mask"]
+                                    )
+                                    flow_mask = (
+                                        1 - best_branch_feats["fixed_mask"]
+                                    ) * best_branch_feats["res_mask"]
+
+                                    gt_trans_0 = best_branch_feats["rigids_t"][..., 4:]
+                                    pred_trans_0 = rigid_pred[..., 4:]
+                                    trans_pred_0 = (
+                                        flow_mask[..., None] * pred_trans_0
+                                        + fixed_mask[..., None] * gt_trans_0
+                                    )
+
+                                    atom37_0 = all_atom.compute_backbone(
+                                        ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                                    )[0]
+                                    all_bb_0_pred.append(du.move_to_np(atom37_0))
+                                    all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                                    atom37_t = all_atom.compute_backbone(
+                                        ru.Rigid.from_tensor_7(
+                                            best_branch_feats["rigids_t"]
+                                        ),
+                                        psi_pred,
+                                    )[0]
+                                    all_bb_prots.append(du.move_to_np(atom37_t))
+                                    final_psi_pred = psi_pred
+
+                                    self._log.debug(
+                                        f"    Divergence-free branching step {step_idx}: collected trajectory frame from selected branch, total frames = {len(all_bb_prots)}"
+                                    )
 
                     current_samples = new_samples
 
