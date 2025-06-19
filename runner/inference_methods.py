@@ -540,6 +540,10 @@ class SDEPathExplorationInference(InferenceMethod):
                             atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                             all_bb_prots.append(du.move_to_np(atom37_t))
                             final_psi_pred = psi_pred
+
+                            self._log.debug(
+                                f"    Non-branch step {step_idx}: collected trajectory frame, total frames = {len(all_bb_prots)}"
+                            )
                 else:
                     # Branching phase
                     self._log.info(
@@ -548,6 +552,9 @@ class SDEPathExplorationInference(InferenceMethod):
                     self._log.info(f"  Current samples: {len(current_samples)}")
                     self._log.info(
                         f"  Creating {num_branches} branches per sample, keeping {num_keep}"
+                    )
+                    self._log.debug(
+                        f"  TRAJECTORY STATUS: Before branching, collected {len(all_bb_prots)} frames"
                     )
 
                     new_samples = []
@@ -622,6 +629,11 @@ class SDEPathExplorationInference(InferenceMethod):
                         branch_scores = []
                         for branch_idx, branch_feats in enumerate(branches):
                             try:
+                                # Log the branch state before simulation
+                                self._log.debug(
+                                    f"      Branch {branch_idx} state at t={t:.4f}: rigids_t shape = {branch_feats['rigids_t'].shape}"
+                                )
+
                                 # Simulate to completion deterministically
                                 self._log.debug(
                                     f"      Simulating branch {branch_idx} to completion..."
@@ -634,6 +646,11 @@ class SDEPathExplorationInference(InferenceMethod):
                                     context,
                                 )
 
+                                # Log the completed trajectory
+                                self._log.debug(
+                                    f"      Branch {branch_idx} completed: prot_traj shape = {completed_sample['prot_traj'].shape}"
+                                )
+
                                 # Evaluate
                                 self._log.debug(
                                     f"      Evaluating branch {branch_idx}..."
@@ -643,6 +660,22 @@ class SDEPathExplorationInference(InferenceMethod):
                                 self._log.info(
                                     f"      Branch {branch_idx}: score = {score:.4f}"
                                 )
+
+                                # DEBUGGING: Also evaluate the branch state itself to see if there's a difference
+                                if step_idx == 0:  # Only for first branch to avoid spam
+                                    branch_eval_sample = {
+                                        "prot_traj": branch_feats["rigids_t"],
+                                        "rigid_0_traj": branch_feats["rigids_t"],
+                                    }
+                                    branch_score = score_fn(
+                                        branch_eval_sample, sample_length
+                                    )
+                                    self._log.info(
+                                        f"      Branch {branch_idx} state score (before completion): {branch_score:.4f}"
+                                    )
+                                    self._log.info(
+                                        f"      Score difference (completion - branch): {score - branch_score:.4f}"
+                                    )
 
                             except Exception as e:
                                 self._log.error(
@@ -655,7 +688,7 @@ class SDEPathExplorationInference(InferenceMethod):
                             f"    Branch scores: {[f'{s:.4f}' for s in branch_scores]}"
                         )
 
-                        # Select best branches
+                        # Select best branches and continue with their states
                         branch_scores = torch.tensor(branch_scores)
                         top_k_indices = torch.topk(
                             branch_scores, k=min(num_keep, len(branches))
@@ -668,12 +701,13 @@ class SDEPathExplorationInference(InferenceMethod):
                             f"    Selected branch scores: {[f'{branch_scores[i]:.4f}' for i in top_k_indices]}"
                         )
 
+                        # Use the actual branch states for continuing
                         for idx in top_k_indices:
                             new_samples.append(branches[idx])
+                            self._log.debug(
+                                f"    Added branch {idx} state to continue from"
+                            )
 
-                    self._log.info(
-                        f"  Total samples after branching: {len(new_samples)}"
-                    )
                     current_samples = new_samples
 
             self._log.info(f"SDE PATH EXPLORATION COMPLETE")
@@ -721,6 +755,12 @@ class SDEPathExplorationInference(InferenceMethod):
             self._log.info(
                 f"  Final trajectory shapes: prot_traj={all_bb_prots.shape}, rigid_traj={all_rigids.shape}"
             )
+            self._log.info(f"  Expected trajectory length: {len(reverse_steps)} steps")
+            self._log.info(f"  Actual trajectory length: {len(all_bb_prots)} frames")
+            self._log.info(
+                f"  Missing frames: {len(reverse_steps) - len(all_bb_prots)}"
+            )
+            self._log.info(f"  Branching steps: {len(branching_steps)}")
 
             # Return final sample in proper format (matching inference_fn)
             sample_out = {
@@ -969,6 +1009,10 @@ class DivergenceFreeODEInference(InferenceMethod):
                             atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                             all_bb_prots.append(du.move_to_np(atom37_t))
                             final_psi_pred = psi_pred
+
+                            self._log.debug(
+                                f"    Non-branch step {step_idx}: collected trajectory frame, total frames = {len(all_bb_prots)}"
+                            )
                 else:
                     # Branching phase with divergence-free exploration
                     new_samples = []
