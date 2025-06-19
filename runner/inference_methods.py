@@ -53,12 +53,28 @@ class InferenceMethod(ABC):
         self, sample_output: Dict[str, Any], sample_length: int
     ) -> float:
         """Evaluate sample using TM-score."""
+        self._log.debug(f"        _tm_score_function: Starting evaluation")
+        self._log.debug(f"        _tm_score_function: sample_length={sample_length}")
+
+        # Log trajectory shapes for debugging
+        if "prot_traj" in sample_output:
+            self._log.debug(
+                f"        _tm_score_function: prot_traj shape = {sample_output['prot_traj'].shape}"
+            )
+        if "rigid_0_traj" in sample_output:
+            self._log.debug(
+                f"        _tm_score_function: rigid_0_traj shape = {sample_output['rigid_0_traj'].shape}"
+            )
+
         # Create temporary directory for evaluation
         temp_dir = os.path.join(self.sampler._output_dir, "temp_eval")
         os.makedirs(temp_dir, exist_ok=True)
 
         try:
             # Save trajectory
+            self._log.debug(
+                f"        _tm_score_function: Saving trajectory to {temp_dir}"
+            )
             traj_paths = self.sampler.save_traj(
                 sample_output["prot_traj"],
                 sample_output["rigid_0_traj"],
@@ -68,18 +84,29 @@ class InferenceMethod(ABC):
 
             # Run evaluation
             pdb_path = traj_paths["sample_path"]
+            self._log.debug(f"        _tm_score_function: PDB saved to {pdb_path}")
+
             sc_output_dir = os.path.join(temp_dir, "self_consistency")
             os.makedirs(sc_output_dir, exist_ok=True)
             shutil.copy(
                 pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
             )
 
+            self._log.debug(
+                f"        _tm_score_function: Running self-consistency evaluation"
+            )
             sc_results = self.sampler.run_self_consistency(
                 sc_output_dir, pdb_path, motif_mask=None
             )
 
-            return sc_results["tm_score"].mean()
+            tm_score = sc_results["tm_score"].mean()
+            self._log.debug(f"        _tm_score_function: TM-score = {tm_score:.4f}")
 
+            return tm_score
+
+        except Exception as e:
+            self._log.error(f"        _tm_score_function: Error during evaluation: {e}")
+            return float("-inf")
         finally:
             # Clean up temporary directory
             if os.path.exists(temp_dir):
@@ -231,7 +258,23 @@ class StandardInference(InferenceMethod):
         self, sample_length: int, context: Optional[torch.Tensor] = None
     ) -> Dict[str, Any]:
         """Generate a single sample using standard inference."""
-        return self.sampler._base_sample(sample_length, context)
+        self._log.info(f"STANDARD INFERENCE START")
+
+        # Get timestep info for debugging
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1] if len(reverse_steps) > 1 else 0
+
+        self._log.info(f"  num_t={num_t}, min_t={min_t:.4f}, dt={dt:.4f}")
+        self._log.info(
+            f"  reverse_steps: {reverse_steps[0]:.4f} -> {reverse_steps[-1]:.4f}"
+        )
+
+        result = self.sampler._base_sample(sample_length, context)
+
+        self._log.info(f"STANDARD INFERENCE COMPLETE")
+        return result
 
 
 class BestOfNInference(InferenceMethod):
@@ -399,21 +442,36 @@ class SDEPathExplorationInference(InferenceMethod):
 
         with torch.no_grad():
             branching_steps = []
+
+            # Calculate branching step interval based on step indices
+            if branch_interval > 0.0:
+                branching_step_interval = max(1, int(num_t * branch_interval))
+                self._log.info(
+                    f"  Branching every {branching_step_interval} steps (branch_interval={branch_interval})"
+                )
+            else:
+                branching_step_interval = 1  # Branch at every step
+                self._log.info(
+                    f"  Branching at every step (branch_interval={branch_interval})"
+                )
+
             for step_idx, t in enumerate(reverse_steps):
-                # Simple branching condition: branch if t >= branch_start_time and t is multiple of branch_interval
-                should_branch = t >= branch_start_time
-                if branch_interval > 0.0:
-                    # Only branch if t is approximately a multiple of branch_interval
-                    should_branch = should_branch and (
-                        abs(t % branch_interval) < 0.001
-                        or abs(t % branch_interval - branch_interval) < 0.001
-                    )
+                # Fixed branching condition: branch if t >= branch_start_time and step_idx is a multiple of branching_step_interval
+                should_branch = False
+
+                if t >= branch_start_time:
+                    if branch_interval <= 0.0:
+                        # Branch at every timestep if branch_interval is 0
+                        should_branch = True
+                    else:
+                        # Branch at regular step intervals
+                        should_branch = step_idx % branching_step_interval == 0
 
                 if should_branch:
                     branching_steps.append((step_idx, t))
 
                 self._log.debug(
-                    f"Step {step_idx}: t={t:.4f}, should_branch={should_branch}"
+                    f"Step {step_idx}: t={t:.4f}, should_branch={should_branch} (step_idx % {branching_step_interval} = {step_idx % branching_step_interval})"
                 )
 
                 if not should_branch:
@@ -793,21 +851,36 @@ class DivergenceFreeODEInference(InferenceMethod):
 
         with torch.no_grad():
             branching_steps = []
+
+            # Calculate branching step interval based on step indices
+            if branch_interval > 0.0:
+                branching_step_interval = max(1, int(num_t * branch_interval))
+                self._log.info(
+                    f"  Branching every {branching_step_interval} steps (branch_interval={branch_interval})"
+                )
+            else:
+                branching_step_interval = 1  # Branch at every step
+                self._log.info(
+                    f"  Branching at every step (branch_interval={branch_interval})"
+                )
+
             for step_idx, t in enumerate(reverse_steps):
-                # Simple branching condition: branch if t >= branch_start_time and t is multiple of branch_interval
-                should_branch = t >= branch_start_time
-                if branch_interval > 0.0:
-                    # Only branch if t is approximately a multiple of branch_interval
-                    should_branch = should_branch and (
-                        abs(t % branch_interval) < 0.001
-                        or abs(t % branch_interval - branch_interval) < 0.001
-                    )
+                # Fixed branching condition: branch if t >= branch_start_time and step_idx is a multiple of branching_step_interval
+                should_branch = False
+
+                if t >= branch_start_time:
+                    if branch_interval <= 0.0:
+                        # Branch at every timestep if branch_interval is 0
+                        should_branch = True
+                    else:
+                        # Branch at regular step intervals
+                        should_branch = step_idx % branching_step_interval == 0
 
                 if should_branch:
                     branching_steps.append((step_idx, t))
 
                 self._log.debug(
-                    f"Step {step_idx}: t={t:.4f}, should_branch={should_branch}"
+                    f"Step {step_idx}: t={t:.4f}, should_branch={should_branch} (step_idx % {branching_step_interval} = {step_idx % branching_step_interval})"
                 )
 
                 if not should_branch:
