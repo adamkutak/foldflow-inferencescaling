@@ -661,22 +661,6 @@ class SDEPathExplorationInference(InferenceMethod):
                                     f"      Branch {branch_idx}: score = {score:.4f}"
                                 )
 
-                                # DEBUGGING: Also evaluate the branch state itself to see if there's a difference
-                                if step_idx == 0:  # Only for first branch to avoid spam
-                                    branch_eval_sample = {
-                                        "prot_traj": branch_feats["rigids_t"],
-                                        "rigid_0_traj": branch_feats["rigids_t"],
-                                    }
-                                    branch_score = score_fn(
-                                        branch_eval_sample, sample_length
-                                    )
-                                    self._log.info(
-                                        f"      Branch {branch_idx} state score (before completion): {branch_score:.4f}"
-                                    )
-                                    self._log.info(
-                                        f"      Score difference (completion - branch): {score - branch_score:.4f}"
-                                    )
-
                             except Exception as e:
                                 self._log.error(
                                     f"      Branch {branch_idx} failed: {e}"
@@ -794,23 +778,10 @@ class SDEPathExplorationInference(InferenceMethod):
                 final_sample = current_samples[0]
                 self._log.info(f"  Using single remaining sample")
             else:
-                # Evaluate all final samples and pick best
-                self._log.info(f"  Evaluating {len(current_samples)} final samples...")
-                final_scores = []
-                for i, feats in enumerate(current_samples):
-                    # Create a simple trajectory for evaluation
-                    sample_out = {
-                        "prot_traj": feats["rigids_t"],
-                        "rigid_0_traj": feats["rigids_t"],
-                    }
-                    score = score_fn(sample_out, sample_length)
-                    final_scores.append(score)
-                    self._log.info(f"    Final sample {i}: score = {score:.4f}")
-
-                best_idx = np.argmax(final_scores)
-                final_sample = current_samples[best_idx]
+                # Just pick the first sample since they're already ranked by score
+                final_sample = current_samples[0]
                 self._log.info(
-                    f"  Selected final sample {best_idx} with score {final_scores[best_idx]:.4f}"
+                    f"  Using first of {len(current_samples)} remaining samples"
                 )
 
             # Flip trajectory so that it starts from t=0 (for visualization)
