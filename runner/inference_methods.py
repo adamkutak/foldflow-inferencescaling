@@ -517,7 +517,21 @@ class SDEPathExplorationInference(InferenceMethod):
                         )
 
                         feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-                        current_samples[i] = feats
+
+                        # CRITICAL FIX: Clean time-dependent features before storing
+                        clean_feats = tree.map_structure(
+                            lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                            feats,
+                        )
+                        # Remove time-dependent features that _set_t_feats adds
+                        if "t" in clean_feats:
+                            del clean_feats["t"]
+                        if "rot_vectorfield_scaling" in clean_feats:
+                            del clean_feats["rot_vectorfield_scaling"]
+                        if "trans_vectorfield_scaling" in clean_feats:
+                            del clean_feats["trans_vectorfield_scaling"]
+
+                        current_samples[i] = clean_feats
 
                         # Collect trajectory data for the main sample (first one) - keep batch dimension
                         if i == 0:
@@ -616,7 +630,22 @@ class SDEPathExplorationInference(InferenceMethod):
                             )
 
                             branch_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-                            branches.append(branch_feats)
+
+                            # CRITICAL FIX: Remove time-dependent features before storing
+                            # These will be re-added by _set_t_feats in the next timestep
+                            clean_branch_feats = tree.map_structure(
+                                lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                                branch_feats,
+                            )
+                            # Remove time-dependent features that _set_t_feats adds
+                            if "t" in clean_branch_feats:
+                                del clean_branch_feats["t"]
+                            if "rot_vectorfield_scaling" in clean_branch_feats:
+                                del clean_branch_feats["rot_vectorfield_scaling"]
+                            if "trans_vectorfield_scaling" in clean_branch_feats:
+                                del clean_branch_feats["trans_vectorfield_scaling"]
+
+                            branches.append(clean_branch_feats)
 
                         self._log.info(f"    Created {len(branches)} branches")
 
@@ -703,10 +732,20 @@ class SDEPathExplorationInference(InferenceMethod):
 
                         # Use the actual branch states for continuing
                         for idx in top_k_indices:
-                            new_samples.append(branches[idx])
-                            self._log.debug(
-                                f"    Added branch {idx} state to continue from"
+                            # CRITICAL FIX: Clean time-dependent features before storing
+                            clean_branch_feats = tree.map_structure(
+                                lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                                branches[idx],
                             )
+                            # Remove time-dependent features that _set_t_feats adds
+                            if "t" in clean_branch_feats:
+                                del clean_branch_feats["t"]
+                            if "rot_vectorfield_scaling" in clean_branch_feats:
+                                del clean_branch_feats["rot_vectorfield_scaling"]
+                            if "trans_vectorfield_scaling" in clean_branch_feats:
+                                del clean_branch_feats["trans_vectorfield_scaling"]
+
+                            new_samples.append(clean_branch_feats)
 
                         # CRITICAL FIX: Collect trajectory data for the selected branch during branching steps
                         if len(top_k_indices) > 0:
@@ -1042,7 +1081,21 @@ class DivergenceFreeODEInference(InferenceMethod):
                         )
 
                         feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-                        current_samples[i] = feats
+
+                        # CRITICAL FIX: Clean time-dependent features before storing
+                        clean_feats = tree.map_structure(
+                            lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                            feats,
+                        )
+                        # Remove time-dependent features that _set_t_feats adds
+                        if "t" in clean_feats:
+                            del clean_feats["t"]
+                        if "rot_vectorfield_scaling" in clean_feats:
+                            del clean_feats["rot_vectorfield_scaling"]
+                        if "trans_vectorfield_scaling" in clean_feats:
+                            del clean_feats["trans_vectorfield_scaling"]
+
+                        current_samples[i] = clean_feats
 
                         # Collect trajectory data for the main sample (first one) - keep batch dimension
                         if i == 0:
@@ -1226,7 +1279,22 @@ class DivergenceFreeODEInference(InferenceMethod):
 
                             # Update current samples with the best branches
                             for _, branch_result, branch_feats in best_branches:
-                                new_samples.append(branch_feats)
+                                # CRITICAL FIX: Clean time-dependent features before storing
+                                clean_branch_feats = tree.map_structure(
+                                    lambda x: (
+                                        x.clone() if torch.is_tensor(x) else x.copy()
+                                    ),
+                                    branch_feats,
+                                )
+                                # Remove time-dependent features that _set_t_feats adds
+                                if "t" in clean_branch_feats:
+                                    del clean_branch_feats["t"]
+                                if "rot_vectorfield_scaling" in clean_branch_feats:
+                                    del clean_branch_feats["rot_vectorfield_scaling"]
+                                if "trans_vectorfield_scaling" in clean_branch_feats:
+                                    del clean_branch_feats["trans_vectorfield_scaling"]
+
+                                new_samples.append(clean_branch_feats)
 
                     current_samples = new_samples
 
