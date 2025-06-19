@@ -708,6 +708,62 @@ class SDEPathExplorationInference(InferenceMethod):
                                 f"    Added branch {idx} state to continue from"
                             )
 
+                        # CRITICAL FIX: Collect trajectory data for the selected branch during branching steps
+                        if len(top_k_indices) > 0:
+                            # Use the first selected branch for trajectory collection
+                            selected_branch = branches[top_k_indices[0]]
+
+                            # Apply the same model step to get the predictions for trajectory collection
+                            selected_branch_copy = tree.map_structure(
+                                lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                                selected_branch,
+                            )
+                            selected_branch_copy = self.sampler.exp._set_t_feats(
+                                selected_branch_copy, t, torch.ones((1,)).to(device)
+                            )
+                            model_out = self.sampler.model(selected_branch_copy)
+
+                            rigid_pred = model_out["rigids"]
+                            psi_pred = model_out["psi"]
+
+                            # Collect trajectory data for this branching step
+                            all_rigids.append(
+                                du.move_to_np(selected_branch["rigids_t"])
+                            )
+
+                            # Calculate x0 prediction
+                            fixed_mask = (
+                                selected_branch["fixed_mask"]
+                                * selected_branch["res_mask"]
+                            )
+                            flow_mask = (
+                                1 - selected_branch["fixed_mask"]
+                            ) * selected_branch["res_mask"]
+
+                            gt_trans_0 = selected_branch["rigids_t"][..., 4:]
+                            pred_trans_0 = rigid_pred[..., 4:]
+                            trans_pred_0 = (
+                                flow_mask[..., None] * pred_trans_0
+                                + fixed_mask[..., None] * gt_trans_0
+                            )
+
+                            atom37_0 = all_atom.compute_backbone(
+                                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                            )[0]
+                            all_bb_0_pred.append(du.move_to_np(atom37_0))
+                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                            atom37_t = all_atom.compute_backbone(
+                                ru.Rigid.from_tensor_7(selected_branch["rigids_t"]),
+                                psi_pred,
+                            )[0]
+                            all_bb_prots.append(du.move_to_np(atom37_t))
+                            final_psi_pred = psi_pred
+
+                            self._log.debug(
+                                f"    Branching step {step_idx}: collected trajectory frame from selected branch, total frames = {len(all_bb_prots)}"
+                            )
+
                     current_samples = new_samples
 
             self._log.info(f"SDE PATH EXPLORATION COMPLETE")
