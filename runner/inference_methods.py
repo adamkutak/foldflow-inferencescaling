@@ -147,6 +147,11 @@ class InferenceMethod(ABC):
 
     def _simulate_to_completion(self, feats, current_t, dt, remaining_steps, context):
         """Simulate a branch to completion deterministically from current_t to min_t."""
+        # Clone the features to avoid modifying the original branch in place
+        feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else copy.deepcopy(x), feats
+        )
+
         device = feats["rigids_t"].device
         min_t = self.sampler._fm_conf.min_t
 
