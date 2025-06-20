@@ -629,38 +629,23 @@ class SDEPathExplorationInference(InferenceMethod):
                         remaining_steps = reverse_steps[step_idx + 1 :]
                         self._log.info(
                             f"    Remaining steps: {len(remaining_steps)} (from t={t:.4f} to t={remaining_steps[-1]:.4f})"
+                            if remaining_steps
+                            else "    No remaining steps (final timestep)"
                         )
 
                         branch_scores = []
                         for branch_idx, branch_feats in enumerate(branches):
                             try:
-                                # Log the branch state before simulation
+                                # Log the branch state before evaluation
                                 self._log.debug(
-                                    f"      Branch {branch_idx} state at t={t:.4f}: rigids_t shape = {branch_feats['rigids_t'].shape}"
-                                )
-
-                                # Simulate to completion deterministically
-                                self._log.debug(
-                                    f"      Simulating branch {branch_idx} to completion..."
-                                )
-                                completed_sample = self._simulate_to_completion(
-                                    branch_feats,
-                                    t,
-                                    dt,
-                                    remaining_steps,
-                                    context,
-                                )
-
-                                # Log the completed trajectory
-                                self._log.debug(
-                                    f"      Branch {branch_idx} completed: prot_traj shape = {completed_sample['prot_traj'].shape}"
+                                    f"      Branch {branch_idx} completed: prot_traj shape = {branch_feats['prot_traj'].shape}"
                                 )
 
                                 # Evaluate
                                 self._log.debug(
                                     f"      Evaluating branch {branch_idx}..."
                                 )
-                                score = score_fn(completed_sample, sample_length)
+                                score = score_fn(branch_feats, sample_length)
                                 branch_scores.append(score)
                                 self._log.info(
                                     f"      Branch {branch_idx}: score = {score:.4f}"
@@ -677,78 +662,93 @@ class SDEPathExplorationInference(InferenceMethod):
                             f"    Branch scores: {[f'{s:.4f}' for s in branch_scores]}"
                         )
 
-                        # Select best branches and continue with their states
-                        branch_scores = torch.tensor(branch_scores)
-                        top_k_indices = torch.topk(
-                            branch_scores, k=min(num_keep, len(branches))
-                        )[1]
+                        # Score all branches and keep the best ones
+                        if branches:
+                            scored_branches = []
+                            for (branch_result, branch_feats), score in zip(
+                                branches, branch_scores
+                            ):
+                                scored_branches.append(
+                                    (score, branch_result, branch_feats)
+                                )
 
-                        self._log.info(
-                            f"    Selected branch indices: {top_k_indices.tolist()}"
-                        )
-                        self._log.info(
-                            f"    Selected branch scores: {[f'{branch_scores[i]:.4f}' for i in top_k_indices]}"
-                        )
+                            # Sort by score (descending) and keep the best
+                            scored_branches.sort(key=lambda x: x[0], reverse=True)
+                            best_branches = scored_branches[:num_keep]
 
-                        # Use the actual branch states for continuing
-                        for idx in top_k_indices:
-                            new_samples.append(branches[idx])
-
-                        # CRITICAL FIX: Collect trajectory data for the selected branch during branching steps
-                        if len(top_k_indices) > 0:
-                            # Use the first selected branch for trajectory collection
-                            selected_branch = branches[top_k_indices[0]]
-
-                            # Apply the same model step to get the predictions for trajectory collection
-                            selected_branch_copy = tree.map_structure(
-                                lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
-                                selected_branch,
+                            # Log selected branches
+                            selected_scores = [score for score, _, _ in best_branches]
+                            selected_indices = [
+                                branch_scores.index(score) for score in selected_scores
+                            ]
+                            self._log.info(
+                                f"    Selected branch indices: {selected_indices}"
                             )
-                            selected_branch_copy = self.sampler.exp._set_t_feats(
-                                selected_branch_copy, t, torch.ones((1,)).to(device)
-                            )
-                            model_out = self.sampler.model(selected_branch_copy)
-
-                            rigid_pred = model_out["rigids"]
-                            psi_pred = model_out["psi"]
-
-                            # Collect trajectory data for this branching step
-                            all_rigids.append(
-                                du.move_to_np(selected_branch["rigids_t"])
+                            self._log.info(
+                                f"    Selected branch scores: {[f'{s:.4f}' for s in selected_scores]}"
                             )
 
-                            # Calculate x0 prediction
-                            fixed_mask = (
-                                selected_branch["fixed_mask"]
-                                * selected_branch["res_mask"]
-                            )
-                            flow_mask = (
-                                1 - selected_branch["fixed_mask"]
-                            ) * selected_branch["res_mask"]
+                            # Update current samples with the best branches
+                            for _, branch_result, branch_feats in best_branches:
+                                new_samples.append(branch_feats)
 
-                            gt_trans_0 = selected_branch["rigids_t"][..., 4:]
-                            pred_trans_0 = rigid_pred[..., 4:]
-                            trans_pred_0 = (
-                                flow_mask[..., None] * pred_trans_0
-                                + fixed_mask[..., None] * gt_trans_0
-                            )
+                            # CRITICAL FIX: Collect trajectory data for the selected branch during branching steps
+                            if len(best_branches) > 0:
+                                # Use the first selected branch for trajectory collection
+                                _, _, selected_branch = best_branches[0]
 
-                            atom37_0 = all_atom.compute_backbone(
-                                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
-                            )[0]
-                            all_bb_0_pred.append(du.move_to_np(atom37_0))
-                            all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                                # Apply the same model step to get the predictions for trajectory collection
+                                selected_branch_copy = tree.map_structure(
+                                    lambda x: (
+                                        x.clone() if torch.is_tensor(x) else x.copy()
+                                    ),
+                                    selected_branch,
+                                )
+                                selected_branch_copy = self.sampler.exp._set_t_feats(
+                                    selected_branch_copy, t, torch.ones((1,)).to(device)
+                                )
+                                model_out = self.sampler.model(selected_branch_copy)
 
-                            atom37_t = all_atom.compute_backbone(
-                                ru.Rigid.from_tensor_7(selected_branch["rigids_t"]),
-                                psi_pred,
-                            )[0]
-                            all_bb_prots.append(du.move_to_np(atom37_t))
-                            final_psi_pred = psi_pred
+                                rigid_pred = model_out["rigids"]
+                                psi_pred = model_out["psi"]
 
-                            self._log.debug(
-                                f"    Branching step {step_idx}: collected trajectory frame from selected branch, total frames = {len(all_bb_prots)}"
-                            )
+                                # Collect trajectory data for this branching step
+                                all_rigids.append(
+                                    du.move_to_np(selected_branch["rigids_t"])
+                                )
+
+                                # Calculate x0 prediction
+                                fixed_mask = (
+                                    selected_branch["fixed_mask"]
+                                    * selected_branch["res_mask"]
+                                )
+                                flow_mask = (
+                                    1 - selected_branch["fixed_mask"]
+                                ) * selected_branch["res_mask"]
+
+                                gt_trans_0 = selected_branch["rigids_t"][..., 4:]
+                                pred_trans_0 = rigid_pred[..., 4:]
+                                trans_pred_0 = (
+                                    flow_mask[..., None] * pred_trans_0
+                                    + fixed_mask[..., None] * gt_trans_0
+                                )
+
+                                atom37_0 = all_atom.compute_backbone(
+                                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                                )[0]
+                                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                                atom37_t = all_atom.compute_backbone(
+                                    ru.Rigid.from_tensor_7(selected_branch["rigids_t"]),
+                                    psi_pred,
+                                )[0]
+                                all_bb_prots.append(du.move_to_np(atom37_t))
+                                final_psi_pred = psi_pred
+
+                                self._log.debug(
+                                    f"    Branching step {step_idx}: collected trajectory frame from selected branch, total frames = {len(all_bb_prots)}"
+                                )
 
                     current_samples = new_samples
 
@@ -911,6 +911,13 @@ class DivergenceFreeODEInference(InferenceMethod):
         context,
     ):
         """Core divergence-free ODE path exploration logic."""
+        self._log.info(f"DIVERGENCE-FREE ODE PATH EXPLORATION START")
+        self._log.info(f"  num_branches={num_branches}, num_keep={num_keep}")
+        self._log.info(
+            f"  lambda_div={lambda_div}, branch_start_time={branch_start_time}"
+        )
+        self._log.info(f"  branch_interval={branch_interval}")
+
         sample_feats = tree.map_structure(
             lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
         )
@@ -921,6 +928,11 @@ class DivergenceFreeODEInference(InferenceMethod):
 
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
         dt = reverse_steps[0] - reverse_steps[1]
+
+        self._log.info(f"  num_t={num_t}, min_t={min_t:.4f}, dt={dt:.4f}")
+        self._log.info(
+            f"  reverse_steps: {reverse_steps[0]:.4f} -> {reverse_steps[-1]:.4f}"
+        )
 
         current_samples = [sample_feats]
 
@@ -1057,9 +1069,22 @@ class DivergenceFreeODEInference(InferenceMethod):
                             )
                 else:
                     # Branching phase with divergence-free exploration
+                    self._log.info(
+                        f"BRANCHING at timestep t={t:.4f} (step {step_idx}/{len(reverse_steps)})"
+                    )
+                    self._log.info(f"  Current samples: {len(current_samples)}")
+                    self._log.info(
+                        f"  Creating {num_branches} branches per sample, keeping {num_keep}"
+                    )
+                    self._log.debug(
+                        f"  TRAJECTORY STATUS: Before branching, collected {len(all_bb_prots)} frames"
+                    )
+
                     new_samples = []
 
-                    for feats in current_samples:
+                    for sample_idx, feats in enumerate(current_samples):
+                        self._log.info(f"  Processing sample {sample_idx}")
+
                         # Create branches with different divergence-free fields
                         branches = []
                         for branch_idx in range(num_branches):
@@ -1191,66 +1216,206 @@ class DivergenceFreeODEInference(InferenceMethod):
                                 )
                                 branches.append((final_result, branch_feats))
 
+                        self._log.info(f"    Created {len(branches)} branches")
+
+                        # Simulate branches to completion and evaluate
+                        remaining_steps = reverse_steps[step_idx + 1 :]
+                        self._log.info(
+                            f"    Remaining steps: {len(remaining_steps)} (from t={t:.4f} to t={remaining_steps[-1]:.4f})"
+                            if remaining_steps
+                            else "    No remaining steps (final timestep)"
+                        )
+
+                        branch_scores = []
+                        for branch_idx, (branch_result, branch_feats) in enumerate(
+                            branches
+                        ):
+                            try:
+                                # Log the branch state before evaluation
+                                self._log.debug(
+                                    f"      Branch {branch_idx} completed: prot_traj shape = {branch_result['prot_traj'].shape}"
+                                )
+
+                                # Evaluate
+                                self._log.debug(
+                                    f"      Evaluating branch {branch_idx}..."
+                                )
+                                score = score_fn(branch_result, sample_length)
+                                branch_scores.append(score)
+                                self._log.info(
+                                    f"      Branch {branch_idx}: score = {score:.4f}"
+                                )
+
+                            except Exception as e:
+                                self._log.error(
+                                    f"      Branch {branch_idx} failed: {e}"
+                                )
+                                branch_scores.append(float("-inf"))
+
+                        # Log all branch scores
+                        self._log.info(
+                            f"    Branch scores: {[f'{s:.4f}' for s in branch_scores]}"
+                        )
+
                         # Score all branches and keep the best ones
                         if branches:
                             scored_branches = []
-                            for branch_result, branch_feats in branches:
-                                try:
-                                    score = score_fn(branch_result, sample_length)
-                                    scored_branches.append(
-                                        (score, branch_result, branch_feats)
-                                    )
-                                except Exception as e:
-                                    self._log.warning(f"Failed to score branch: {e}")
-                                    scored_branches.append(
-                                        (-float("inf"), branch_result, branch_feats)
-                                    )
+                            for (branch_result, branch_feats), score in zip(
+                                branches, branch_scores
+                            ):
+                                scored_branches.append(
+                                    (score, branch_result, branch_feats)
+                                )
 
                             # Sort by score (descending) and keep the best
                             scored_branches.sort(key=lambda x: x[0], reverse=True)
                             best_branches = scored_branches[:num_keep]
 
+                            # Log selected branches
+                            selected_scores = [score for score, _, _ in best_branches]
+                            selected_indices = [
+                                branch_scores.index(score) for score in selected_scores
+                            ]
+                            self._log.info(
+                                f"    Selected branch indices: {selected_indices}"
+                            )
+                            self._log.info(
+                                f"    Selected branch scores: {[f'{s:.4f}' for s in selected_scores]}"
+                            )
+
                             # Update current samples with the best branches
                             for _, branch_result, branch_feats in best_branches:
                                 new_samples.append(branch_feats)
 
+                            # CRITICAL FIX: Collect trajectory data for the selected branch during branching steps
+                            if len(best_branches) > 0:
+                                # Use the first selected branch for trajectory collection
+                                _, _, selected_branch = best_branches[0]
+
+                                # Apply the same model step to get the predictions for trajectory collection
+                                selected_branch_copy = tree.map_structure(
+                                    lambda x: (
+                                        x.clone() if torch.is_tensor(x) else x.copy()
+                                    ),
+                                    selected_branch,
+                                )
+                                selected_branch_copy = self.sampler.exp._set_t_feats(
+                                    selected_branch_copy, t, torch.ones((1,)).to(device)
+                                )
+                                model_out = self.sampler.model(selected_branch_copy)
+
+                                rigid_pred = model_out["rigids"]
+                                psi_pred = model_out["psi"]
+
+                                # Collect trajectory data for this branching step
+                                all_rigids.append(
+                                    du.move_to_np(selected_branch["rigids_t"])
+                                )
+
+                                # Calculate x0 prediction
+                                fixed_mask = (
+                                    selected_branch["fixed_mask"]
+                                    * selected_branch["res_mask"]
+                                )
+                                flow_mask = (
+                                    1 - selected_branch["fixed_mask"]
+                                ) * selected_branch["res_mask"]
+
+                                gt_trans_0 = selected_branch["rigids_t"][..., 4:]
+                                pred_trans_0 = rigid_pred[..., 4:]
+                                trans_pred_0 = (
+                                    flow_mask[..., None] * pred_trans_0
+                                    + fixed_mask[..., None] * gt_trans_0
+                                )
+
+                                atom37_0 = all_atom.compute_backbone(
+                                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                                )[0]
+                                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                                atom37_t = all_atom.compute_backbone(
+                                    ru.Rigid.from_tensor_7(selected_branch["rigids_t"]),
+                                    psi_pred,
+                                )[0]
+                                all_bb_prots.append(du.move_to_np(atom37_t))
+                                final_psi_pred = psi_pred
+
+                                self._log.debug(
+                                    f"    Branching step {step_idx}: collected trajectory frame from selected branch, total frames = {len(all_bb_prots)}"
+                                )
+
                     current_samples = new_samples
 
-        # Return the final sample from the best branch
-        if current_samples:
-            final_feats = current_samples[0]
-        else:
-            final_feats = sample_feats
+            self._log.info(f"DIVERGENCE-FREE ODE PATH EXPLORATION COMPLETE")
+            self._log.info(f"  Total branching steps: {len(branching_steps)}")
+            if branching_steps:
+                self._log.info(
+                    f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
+                )
+            else:
+                self._log.info(
+                    f"  No branching occurred (branch_start_time={branch_start_time}, branch_interval={branch_interval})"
+                )
 
-        # Complete the simulation if we haven't reached the end
-        remaining_steps = [t for t in reverse_steps if t < branch_start_time]
-        if remaining_steps and len(all_bb_prots) == 0:
-            # We branched early, need to complete the trajectory
-            final_result = self._simulate_to_completion(
-                final_feats, reverse_steps[0], dt, remaining_steps, context
+            # Return best final sample
+            if len(current_samples) == 1:
+                final_sample = current_samples[0]
+                self._log.info(f"  Using single remaining sample")
+            else:
+                # Evaluate all final samples and pick best
+                self._log.info(f"  Evaluating {len(current_samples)} final samples...")
+                final_scores = []
+                for i, feats in enumerate(current_samples):
+                    # Create a simple trajectory for evaluation
+                    sample_out = {
+                        "prot_traj": feats["rigids_t"],
+                        "rigid_0_traj": feats["rigids_t"],
+                    }
+                    score = score_fn(sample_out, sample_length)
+                    final_scores.append(score)
+                    self._log.info(f"    Final sample {i}: score = {score:.4f}")
+
+                best_idx = np.argmax(final_scores)
+                final_sample = current_samples[best_idx]
+                self._log.info(
+                    f"  Selected final sample {best_idx} with score {final_scores[best_idx]:.4f}"
+                )
+
+            # Flip trajectory so that it starts from t=0 (for visualization)
+            flip = lambda x: np.flip(np.stack(x), (0,))
+            all_bb_prots = flip(all_bb_prots)
+            all_rigids = flip(all_rigids)
+            all_trans_0_pred = flip(all_trans_0_pred)
+            all_bb_0_pred = flip(all_bb_0_pred)
+
+            self._log.info(
+                f"  Final trajectory shapes: prot_traj={all_bb_prots.shape}, rigid_traj={all_rigids.shape}"
             )
-            return final_result
+            self._log.info(f"  Expected trajectory length: {len(reverse_steps)} steps")
+            self._log.info(f"  Actual trajectory length: {len(all_bb_prots)} frames")
+            self._log.info(
+                f"  Missing frames: {len(reverse_steps) - len(all_bb_prots)}"
+            )
+            self._log.info(f"  Branching steps: {len(branching_steps)}")
 
-        # Flip trajectory so that it starts from t=0 (for visualization)
-        flip = lambda x: np.flip(np.stack(x), (0,))
-        all_bb_prots = flip(all_bb_prots)
-        all_rigids = flip(all_rigids)
-        all_trans_0_pred = flip(all_trans_0_pred)
-        all_bb_0_pred = flip(all_bb_0_pred)
+            # Return final sample in proper format (matching inference_fn)
+            sample_out = {
+                "prot_traj": all_bb_prots,
+                "rigid_traj": all_rigids,
+                "trans_traj": all_trans_0_pred,
+                "psi_pred": (
+                    final_psi_pred[None] if final_psi_pred is not None else None
+                ),
+                "rigid_0_traj": all_bb_0_pred,
+            }
 
-        # Return final sample in proper format (matching inference_fn)
-        sample_out = {
-            "prot_traj": all_bb_prots,
-            "rigid_traj": all_rigids,
-            "trans_traj": all_trans_0_pred,
-            "psi_pred": (final_psi_pred[None] if final_psi_pred is not None else None),
-            "rigid_0_traj": all_bb_0_pred,
-        }
+            # Remove batch dimension like _base_sample does
+            result = tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
+            )
 
-        # Remove batch dimension like _base_sample does
-        return tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
-        )
+            return result
 
 
 class SDESimpleInference(InferenceMethod):
@@ -1489,20 +1654,28 @@ class DivergenceFreeSimpleInference(InferenceMethod):
                 rigids_tensor = sample_feats["rigids_t"]
                 t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
 
-                # Extract rotation matrices and translations
+                # Extract rotation matrices and translations directly as torch tensors (stay on GPU)
                 rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
                 rot_mats = rigid_obj.get_rots().get_rot_mats()  # [B, N, 3, 3]
                 trans_vecs = rigid_obj.get_trans()  # [B, N, 3]
 
-                # Generate divergence-free noise
+                # Generate divergence-free noise for rotation field
                 rot_divfree_noise = divfree_swirl_si(
-                    rot_mats, t_batch, None, rot_vectorfield
-                )
-                trans_divfree_noise = divfree_swirl_si(
-                    trans_vecs, t_batch, None, trans_vectorfield
+                    rot_mats,  # [B, N, 3, 3] rotation matrices
+                    t_batch,
+                    None,  # y not used
+                    rot_vectorfield,
                 )
 
-                # Add divergence-free noise to vector fields
+                # Generate divergence-free noise for translation field
+                trans_divfree_noise = divfree_swirl_si(
+                    trans_vecs,  # [B, N, 3] translation vectors
+                    t_batch,
+                    None,  # y not used
+                    trans_vectorfield,
+                )
+
+                # Add divergence-free noise to vector fields (no sqrt(dt) scaling)
                 rot_vectorfield = rot_vectorfield + lambda_div * rot_divfree_noise
                 trans_vectorfield = trans_vectorfield + lambda_div * trans_divfree_noise
 
