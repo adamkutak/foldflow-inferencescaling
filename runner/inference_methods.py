@@ -661,22 +661,6 @@ class SDEPathExplorationInference(InferenceMethod):
                                     f"      Branch {branch_idx}: score = {score:.4f}"
                                 )
 
-                                # DEBUGGING: Also evaluate the branch state itself to see if there's a difference
-                                if step_idx == 0:  # Only for first branch to avoid spam
-                                    branch_eval_sample = {
-                                        "prot_traj": branch_feats["rigids_t"],
-                                        "rigid_0_traj": branch_feats["rigids_t"],
-                                    }
-                                    branch_score = score_fn(
-                                        branch_eval_sample, sample_length
-                                    )
-                                    self._log.info(
-                                        f"      Branch {branch_idx} state score (before completion): {branch_score:.4f}"
-                                    )
-                                    self._log.info(
-                                        f"      Score difference (completion - branch): {score - branch_score:.4f}"
-                                    )
-
                             except Exception as e:
                                 self._log.error(
                                     f"      Branch {branch_idx} failed: {e}"
@@ -704,9 +688,6 @@ class SDEPathExplorationInference(InferenceMethod):
                         # Use the actual branch states for continuing
                         for idx in top_k_indices:
                             new_samples.append(branches[idx])
-                            self._log.debug(
-                                f"    Added branch {idx} state to continue from"
-                            )
 
                         # CRITICAL FIX: Collect trajectory data for the selected branch during branching steps
                         if len(top_k_indices) > 0:
