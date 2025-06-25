@@ -95,9 +95,36 @@ class InferenceMethod(ABC):
             self._log.debug(
                 f"        _tm_score_function: Running self-consistency evaluation"
             )
+
+            # Debug: Check what files exist before running self-consistency
+            if os.path.exists(sc_output_dir):
+                files_before = os.listdir(sc_output_dir)
+                self._log.debug(
+                    f"        _tm_score_function: Files in {sc_output_dir} before SC: {files_before}"
+                )
+
             sc_results = self.sampler.run_self_consistency(
                 sc_output_dir, pdb_path, motif_mask=None
             )
+
+            # Debug: Check what files exist after running self-consistency
+            if os.path.exists(sc_output_dir):
+                files_after = os.listdir(sc_output_dir)
+                self._log.debug(
+                    f"        _tm_score_function: Files in {sc_output_dir} after SC: {files_after}"
+                )
+
+                # Check specifically for seqs directory
+                seqs_dir = os.path.join(sc_output_dir, "seqs")
+                if os.path.exists(seqs_dir):
+                    seq_files = os.listdir(seqs_dir)
+                    self._log.debug(
+                        f"        _tm_score_function: Files in seqs directory: {seq_files}"
+                    )
+                else:
+                    self._log.debug(
+                        f"        _tm_score_function: seqs directory does not exist"
+                    )
 
             tm_score = sc_results["tm_score"].mean()
             self._log.debug(f"        _tm_score_function: TM-score = {tm_score:.4f}")
@@ -106,6 +133,44 @@ class InferenceMethod(ABC):
 
         except Exception as e:
             self._log.error(f"        _tm_score_function: Error during evaluation: {e}")
+
+            # Additional debugging: check if it's a file not found error
+            if "No such file or directory" in str(e):
+                self._log.error(
+                    f"        _tm_score_function: Missing file error - likely ProteinMPNN failed to generate sequences"
+                )
+
+                # Check if parsed_pdbs.jsonl was created
+                parsed_pdbs_path = os.path.join(sc_output_dir, "parsed_pdbs.jsonl")
+                if os.path.exists(parsed_pdbs_path):
+                    self._log.debug(
+                        f"        _tm_score_function: parsed_pdbs.jsonl exists"
+                    )
+                else:
+                    self._log.debug(
+                        f"        _tm_score_function: parsed_pdbs.jsonl missing - parsing failed"
+                    )
+
+                # Check if the original PDB file is valid
+                if os.path.exists(pdb_path):
+                    self._log.debug(
+                        f"        _tm_score_function: Original PDB file exists: {pdb_path}"
+                    )
+                    try:
+                        with open(pdb_path, "r") as f:
+                            content = f.read()
+                            self._log.debug(
+                                f"        _tm_score_function: PDB file size: {len(content)} chars"
+                            )
+                    except Exception as pdb_e:
+                        self._log.error(
+                            f"        _tm_score_function: Cannot read PDB file: {pdb_e}"
+                        )
+                else:
+                    self._log.error(
+                        f"        _tm_score_function: Original PDB file missing: {pdb_path}"
+                    )
+
             return float("-inf")
         finally:
             # Clean up temporary directory
@@ -480,7 +545,7 @@ class SDEPathExplorationInference(InferenceMethod):
                 )
 
                 if not should_branch:
-                    # Regular flow with SDE noise at every step
+                    # Regular deterministic ODE flow (no noise except during branching)
                     for i, feats in enumerate(current_samples):
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
@@ -489,23 +554,9 @@ class SDEPathExplorationInference(InferenceMethod):
 
                         rot_vectorfield = model_out["rot_vectorfield"]
                         trans_vectorfield = model_out["trans_vectorfield"]
+
                         rigid_pred = model_out["rigids"]
                         psi_pred = model_out["psi"]
-
-                        # Add SDE noise at every step
-                        noise_rot = (
-                            torch.randn_like(rot_vectorfield)
-                            * noise_scale
-                            * np.sqrt(dt)
-                        )
-                        noise_trans = (
-                            torch.randn_like(trans_vectorfield)
-                            * noise_scale
-                            * np.sqrt(dt)
-                        )
-
-                        rot_vectorfield = rot_vectorfield + noise_rot
-                        trans_vectorfield = trans_vectorfield + noise_trans
 
                         fixed_mask = feats["fixed_mask"] * feats["res_mask"]
                         flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
@@ -571,7 +622,8 @@ class SDEPathExplorationInference(InferenceMethod):
                         branches = []
                         for branch_idx in range(num_branches):
                             branch_feats = tree.map_structure(
-                                lambda x: x.clone(), feats
+                                lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                                feats,
                             )
 
                             # Apply SDE step with noise
@@ -583,7 +635,7 @@ class SDEPathExplorationInference(InferenceMethod):
                             rot_vectorfield = model_out["rot_vectorfield"]
                             trans_vectorfield = model_out["trans_vectorfield"]
 
-                            # Add noise to vector fields for SDE
+                            # Add noise to vector fields for SDE branching
                             noise_rot = (
                                 torch.randn_like(rot_vectorfield)
                                 * noise_scale
@@ -978,7 +1030,7 @@ class DivergenceFreeODEInference(InferenceMethod):
                 )
 
                 if not should_branch:
-                    # Regular flow with divergence-free noise at every step
+                    # Regular deterministic ODE flow (no noise except during branching)
                     for i, feats in enumerate(current_samples):
                         feats = self.sampler.exp._set_t_feats(
                             feats, t, torch.ones((1,)).to(device)
@@ -989,41 +1041,6 @@ class DivergenceFreeODEInference(InferenceMethod):
                         trans_vectorfield = model_out["trans_vectorfield"]
                         rigid_pred = model_out["rigids"]
                         psi_pred = model_out["psi"]
-
-                        # Add divergence-free noise at every step
-                        rigids_tensor = feats["rigids_t"]
-                        t_batch = torch.full(
-                            (rigids_tensor.shape[0],), t, device=device
-                        )
-
-                        # Extract rotation matrices and translations directly as torch tensors (stay on GPU)
-                        rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
-                        rot_mats = rigid_obj.get_rots().get_rot_mats()  # [B, N, 3, 3]
-                        trans_vecs = rigid_obj.get_trans()  # [B, N, 3]
-
-                        # Generate divergence-free noise for rotation field
-                        rot_divfree_noise = divfree_swirl_si(
-                            rot_mats,  # [B, N, 3, 3] rotation matrices
-                            t_batch,
-                            None,  # y not used
-                            rot_vectorfield,
-                        )
-
-                        # Generate divergence-free noise for translation field
-                        trans_divfree_noise = divfree_swirl_si(
-                            trans_vecs,  # [B, N, 3] translation vectors
-                            t_batch,
-                            None,  # y not used
-                            trans_vectorfield,
-                        )
-
-                        # Add divergence-free noise to vector fields (no sqrt(dt) scaling)
-                        rot_vectorfield = (
-                            rot_vectorfield + lambda_div * rot_divfree_noise
-                        )
-                        trans_vectorfield = (
-                            trans_vectorfield + lambda_div * trans_divfree_noise
-                        )
 
                         fixed_mask = feats["fixed_mask"] * feats["res_mask"]
                         flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
@@ -1102,6 +1119,7 @@ class DivergenceFreeODEInference(InferenceMethod):
                             rot_vectorfield = model_out["rot_vectorfield"]
                             trans_vectorfield = model_out["trans_vectorfield"]
 
+                            # Add divergence-free noise to vector fields for branching
                             rigids_tensor = branch_feats["rigids_t"]
                             t_batch = torch.full(
                                 (rigids_tensor.shape[0],), t, device=device
@@ -1484,17 +1502,6 @@ class SDESimpleInference(InferenceMethod):
                 rigid_pred = model_out["rigids"]
                 psi_pred = model_out["psi"]
 
-                # Add SDE noise
-                noise_rot = (
-                    torch.randn_like(rot_vectorfield) * noise_scale * np.sqrt(dt)
-                )
-                noise_trans = (
-                    torch.randn_like(trans_vectorfield) * noise_scale * np.sqrt(dt)
-                )
-
-                rot_vectorfield = rot_vectorfield + noise_rot
-                trans_vectorfield = trans_vectorfield + noise_trans
-
                 fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
                 flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
 
@@ -1633,27 +1640,6 @@ class DivergenceFreeSimpleInference(InferenceMethod):
                 trans_vectorfield = model_out["trans_vectorfield"]
                 rigid_pred = model_out["rigids"]
                 psi_pred = model_out["psi"]
-
-                # Add divergence-free noise
-                rigids_tensor = sample_feats["rigids_t"]
-                t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
-
-                # Extract rotation matrices and translations
-                rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
-                rot_mats = rigid_obj.get_rots().get_rot_mats()  # [B, N, 3, 3]
-                trans_vecs = rigid_obj.get_trans()  # [B, N, 3]
-
-                # Generate divergence-free noise
-                rot_divfree_noise = divfree_swirl_si(
-                    rot_mats, t_batch, None, rot_vectorfield
-                )
-                trans_divfree_noise = divfree_swirl_si(
-                    trans_vecs, t_batch, None, trans_vectorfield
-                )
-
-                # Add divergence-free noise to vector fields
-                rot_vectorfield = rot_vectorfield + lambda_div * rot_divfree_noise
-                trans_vectorfield = trans_vectorfield + lambda_div * trans_divfree_noise
 
                 fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
                 flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
