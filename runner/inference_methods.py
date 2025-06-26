@@ -95,36 +95,9 @@ class InferenceMethod(ABC):
             self._log.debug(
                 f"        _tm_score_function: Running self-consistency evaluation"
             )
-
-            # Debug: Check what files exist before running self-consistency
-            if os.path.exists(sc_output_dir):
-                files_before = os.listdir(sc_output_dir)
-                self._log.debug(
-                    f"        _tm_score_function: Files in {sc_output_dir} before SC: {files_before}"
-                )
-
             sc_results = self.sampler.run_self_consistency(
                 sc_output_dir, pdb_path, motif_mask=None
             )
-
-            # Debug: Check what files exist after running self-consistency
-            if os.path.exists(sc_output_dir):
-                files_after = os.listdir(sc_output_dir)
-                self._log.debug(
-                    f"        _tm_score_function: Files in {sc_output_dir} after SC: {files_after}"
-                )
-
-                # Check specifically for seqs directory
-                seqs_dir = os.path.join(sc_output_dir, "seqs")
-                if os.path.exists(seqs_dir):
-                    seq_files = os.listdir(seqs_dir)
-                    self._log.debug(
-                        f"        _tm_score_function: Files in seqs directory: {seq_files}"
-                    )
-                else:
-                    self._log.debug(
-                        f"        _tm_score_function: seqs directory does not exist"
-                    )
 
             tm_score = sc_results["tm_score"].mean()
             self._log.debug(f"        _tm_score_function: TM-score = {tm_score:.4f}")
@@ -133,44 +106,6 @@ class InferenceMethod(ABC):
 
         except Exception as e:
             self._log.error(f"        _tm_score_function: Error during evaluation: {e}")
-
-            # Additional debugging: check if it's a file not found error
-            if "No such file or directory" in str(e):
-                self._log.error(
-                    f"        _tm_score_function: Missing file error - likely ProteinMPNN failed to generate sequences"
-                )
-
-                # Check if parsed_pdbs.jsonl was created
-                parsed_pdbs_path = os.path.join(sc_output_dir, "parsed_pdbs.jsonl")
-                if os.path.exists(parsed_pdbs_path):
-                    self._log.debug(
-                        f"        _tm_score_function: parsed_pdbs.jsonl exists"
-                    )
-                else:
-                    self._log.debug(
-                        f"        _tm_score_function: parsed_pdbs.jsonl missing - parsing failed"
-                    )
-
-                # Check if the original PDB file is valid
-                if os.path.exists(pdb_path):
-                    self._log.debug(
-                        f"        _tm_score_function: Original PDB file exists: {pdb_path}"
-                    )
-                    try:
-                        with open(pdb_path, "r") as f:
-                            content = f.read()
-                            self._log.debug(
-                                f"        _tm_score_function: PDB file size: {len(content)} chars"
-                            )
-                    except Exception as pdb_e:
-                        self._log.error(
-                            f"        _tm_score_function: Cannot read PDB file: {pdb_e}"
-                        )
-                else:
-                    self._log.error(
-                        f"        _tm_score_function: Original PDB file missing: {pdb_path}"
-                    )
-
             return float("-inf")
         finally:
             # Clean up temporary directory

@@ -166,9 +166,17 @@ class SimpleNoiseExperimentRunner:
                 scores.append(score)
                 self.logger.info(f"    Score: {score:.4f}, Time: {sample_time:.2f}s")
 
+                # Clear GPU memory after each sample
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
             except Exception as e:
                 self.logger.error(f"Error in sample {sample_idx}: {e}")
                 scores.append(float("nan"))
+
+                # Clear GPU memory even on error
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         total_time = time.time() - start_time
 
