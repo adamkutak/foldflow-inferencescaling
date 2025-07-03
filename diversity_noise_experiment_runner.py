@@ -238,20 +238,12 @@ class DiversityNoiseExperimentRunner:
                 prot_i = samples[i]["prot_traj"][-1]  # Final frame
                 prot_j = samples[j]["prot_traj"][-1]  # Final frame
 
-                # Compute RMSD between the two structures
-                try:
-                    # Use CA atoms for RMSD calculation
-                    ca_i = prot_i[:, 1, :]  # CA atoms (index 1)
-                    ca_j = prot_j[:, 1, :]  # CA atoms (index 1)
-
-                    # Compute RMSD
-                    rmsd = metrics.calc_aligned_rmsd(ca_i, ca_j)
-                    distances.append(rmsd)
-
-                except Exception as e:
-                    self.logger.warning(
-                        f"Error computing RMSD between samples {i} and {j}: {e}"
-                    )
+                # Use CA atoms for RMSD calculation
+                ca_i = prot_i[:, 1, :]  # CA atoms (index 1)
+                ca_j = prot_j[:, 1, :]  # CA atoms (index 1)
+                # Compute RMSD
+                rmsd = metrics.calc_aligned_rmsd(ca_i, ca_j)
+                distances.append(rmsd)
 
         return distances
 
