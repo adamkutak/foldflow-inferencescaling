@@ -244,24 +244,8 @@ class DiversityNoiseExperimentRunner:
                     ca_i = prot_i[:, 1, :]  # CA atoms (index 1)
                     ca_j = prot_j[:, 1, :]  # CA atoms (index 1)
 
-                    # Debug: print shapes and a few values
-                    self.logger.info(
-                        f"Pair ({i},{j}): ca_i shape {ca_i.shape}, ca_j shape {ca_j.shape}"
-                    )
-                    self.logger.info(
-                        f"Pair ({i},{j}): ca_i sample {ca_i[:3]}, ca_j sample {ca_j[:3]}"
-                    )
-
-                    if ca_i.shape != ca_j.shape:
-                        self.logger.warning(
-                            f"CA shapes do not match for pair ({i},{j}): {ca_i.shape} vs {ca_j.shape}"
-                        )
-                    if ca_i.size == 0 or ca_j.size == 0:
-                        self.logger.warning(f"Empty CA array for pair ({i},{j})")
-
                     # Compute RMSD
                     rmsd = metrics.calc_aligned_rmsd(ca_i, ca_j)
-                    self.logger.info(f"Pair ({i},{j}): RMSD = {rmsd}")
                     distances.append(rmsd)
 
                 except Exception as e:
@@ -457,10 +441,10 @@ class DiversityNoiseExperimentRunner:
         """Run all experiments with different methods and noise levels."""
         experiments = []
 
-        # 1. Baseline: Standard sampling
-        experiments.append({"method": "standard", "config": {}})
+        # Remove the baseline: Standard sampling (do not append it)
+        # experiments.append({"method": "standard", "config": {}})
 
-        # 2. Simple SDE with different noise scales
+        # 1. Simple SDE with different noise scales
         for noise_scale in self.args.noise_scales:
             experiments.append(
                 {
@@ -471,7 +455,7 @@ class DiversityNoiseExperimentRunner:
                 }
             )
 
-        # 3. Simple divergence-free with different lambda values
+        # 2. Simple divergence-free with different lambda values
         for lambda_div in self.args.lambda_divs:
             experiments.append(
                 {
@@ -541,22 +525,8 @@ class DiversityNoiseExperimentRunner:
         print("DIVERSITY NOISE EXPERIMENT RESULTS")
         print("=" * 80)
 
-        # Find baseline (standard method)
-        baseline = None
-        for result in self.results:
-            if result["method"] == "standard":
-                baseline = result
-                break
-
-        if baseline is None:
-            print("Warning: No baseline (standard) method found!")
-            return
-
-        baseline_distance = baseline["overall_mean_distance"]
-
-        print(
-            f"Baseline (Standard): {baseline_distance:.4f}±{baseline['overall_std_distance']:.4f}"
-        )
+        # Remove baseline: do not look for or print standard method
+        baseline_distance = None
         print(f"Sample Length: {self.args.sample_length}")
         print(f"Batch Size: {self.args.batch_size}")
         print(f"Number of Batches: {self.args.num_batches}")
@@ -572,9 +542,6 @@ class DiversityNoiseExperimentRunner:
 
         # Print results for each method
         for method_name, method_results in methods.items():
-            if method_name == "standard":
-                continue
-
             print(f"{method_name.upper()}:")
             if method_name == "sde_simple":
                 param_name = "Noise Scale"
@@ -582,23 +549,18 @@ class DiversityNoiseExperimentRunner:
                 param_name = "Lambda Div"
 
             print(
-                f"{param_name:<12} {'Mean Distance':<15} {'Diversity Change':<15} {'Total Pairs':<12} {'Time (s)':<10}"
+                f"{param_name:<12} {'Mean Distance':<15} {'Total Pairs':<12} {'Time (s)':<10}"
             )
-            print("-" * 70)
+            print("-" * 60)
 
             for result in sorted(method_results, key=lambda x: x["noise_parameter"]):
                 noise_param = result["noise_parameter"]
                 mean_distance = result["overall_mean_distance"]
-                diversity_change = (
-                    ((mean_distance - baseline_distance) / baseline_distance * 100)
-                    if baseline_distance > 0 and not np.isnan(mean_distance)
-                    else float("nan")
-                )
                 total_pairs = result["total_pairs"]
                 total_time = result["total_time"]
 
                 print(
-                    f"{noise_param:<12.3f} {mean_distance:<15.4f} {diversity_change:<15.2f}% {total_pairs:<12} {total_time:<10.2f}"
+                    f"{noise_param:<12.3f} {mean_distance:<15.4f} {total_pairs:<12} {total_time:<10.2f}"
                 )
             print()
 
@@ -611,11 +573,6 @@ class DiversityNoiseExperimentRunner:
                 else 0.0
             ),
         )
-        diversity_increase = (
-            (best_result["overall_mean_distance"] - baseline_distance)
-            / baseline_distance
-            * 100
-        )
 
         print(f"HIGHEST DIVERSITY:")
         print(
@@ -624,7 +581,6 @@ class DiversityNoiseExperimentRunner:
         print(
             f"Mean Distance: {best_result['overall_mean_distance']:.4f}±{best_result['overall_std_distance']:.4f}"
         )
-        print(f"Diversity Increase: {diversity_increase:.2f}% over baseline")
         print(f"Total Time: {best_result['total_time']:.2f}s")
         print()
 
