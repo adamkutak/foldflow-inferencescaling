@@ -149,98 +149,159 @@ class SimpleNoiseExperimentRunner:
         # Log memory after creating sampler
         self.log_gpu_memory(f"After creating sampler for {method_name}")
 
-        # Track timing and results
-        start_time = time.time()
-        scores = []
+        try:
+            # Track timing and results
+            start_time = time.time()
+            scores = []
 
-        for sample_idx in range(self.args.num_samples):
-            self.logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
+            for sample_idx in range(self.args.num_samples):
+                self.logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
 
-            # Log memory before sample
-            self.log_gpu_memory(f"Before sample {sample_idx + 1}")
+                # Log memory before sample
+                self.log_gpu_memory(f"Before sample {sample_idx + 1}")
 
-            try:
-                # Generate sample
-                sample_start = time.time()
-                sample_result = sampler.inference_method.sample(self.args.sample_length)
-                sample_time = time.time() - sample_start
+                try:
+                    # Generate sample
+                    sample_start = time.time()
+                    sample_result = sampler.inference_method.sample(
+                        self.args.sample_length
+                    )
+                    sample_time = time.time() - sample_start
 
-                # Log memory after sample generation
-                self.log_gpu_memory(f"After sample {sample_idx + 1} generation")
+                    # Log memory after sample generation
+                    self.log_gpu_memory(f"After sample {sample_idx + 1} generation")
 
-                # Extract sample and score
-                if isinstance(sample_result, dict) and "sample" in sample_result:
-                    sample_output = sample_result["sample"]
-                    if "score" in sample_result:
-                        score = sample_result["score"]
+                    # Extract sample and score
+                    if isinstance(sample_result, dict) and "sample" in sample_result:
+                        sample_output = sample_result["sample"]
+                        if "score" in sample_result:
+                            score = sample_result["score"]
+                        else:
+                            score_fn = sampler.inference_method.get_score_function(
+                                self.args.scoring_function
+                            )
+                            score = score_fn(sample_output, self.args.sample_length)
                     else:
+                        sample_output = sample_result
                         score_fn = sampler.inference_method.get_score_function(
                             self.args.scoring_function
                         )
                         score = score_fn(sample_output, self.args.sample_length)
-                else:
-                    sample_output = sample_result
-                    score_fn = sampler.inference_method.get_score_function(
-                        self.args.scoring_function
+
+                    # Log memory after scoring
+                    self.log_gpu_memory(f"After sample {sample_idx + 1} scoring")
+
+                    scores.append(score)
+                    self.logger.info(
+                        f"    Score: {score:.4f}, Time: {sample_time:.2f}s"
                     )
-                    score = score_fn(sample_output, self.args.sample_length)
 
-                # Log memory after scoring
-                self.log_gpu_memory(f"After sample {sample_idx + 1} scoring")
+                    # Clear GPU memory after each sample
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
-                scores.append(score)
-                self.logger.info(f"    Score: {score:.4f}, Time: {sample_time:.2f}s")
+                    # Log memory after cleanup
+                    self.log_gpu_memory(f"After sample {sample_idx + 1} cleanup")
 
-                # Clear GPU memory after each sample
+                except Exception as e:
+                    self.logger.error(f"Error in sample {sample_idx}: {e}")
+                    scores.append(float("nan"))
+
+                    # Clear GPU memory even on error
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+            total_time = time.time() - start_time
+
+            # Calculate statistics
+            valid_scores = [s for s in scores if not np.isnan(s)]
+            if valid_scores:
+                mean_score = np.mean(valid_scores)
+                std_score = np.std(valid_scores)
+                max_score = np.max(valid_scores)
+                min_score = np.min(valid_scores)
+            else:
+                mean_score = std_score = max_score = min_score = float("nan")
+
+            result = {
+                "method": method_name,
+                "noise_parameter": noise_param,
+                "config": config,
+                "num_samples": len(valid_scores),
+                "mean_score": mean_score,
+                "std_score": std_score,
+                "max_score": max_score,
+                "min_score": min_score,
+                "total_time": total_time,
+                "time_per_sample": total_time / self.args.num_samples,
+                "scores": scores,
+                "scoring_function": self.args.scoring_function,
+            }
+
+            self.logger.info(
+                f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
+            )
+
+            # Log memory after experiment completion
+            self.log_gpu_memory(f"After {method_name} experiment complete")
+
+            return result
+
+        finally:
+            # Explicit cleanup of sampler to prevent memory leaks
+            try:
+                self.logger.info(f"Cleaning up sampler for {method_name}")
+
+                # Move models to CPU and delete them explicitly
+                if hasattr(sampler, "model") and sampler.model is not None:
+                    sampler.model = sampler.model.cpu()
+                    del sampler.model
+
+                if (
+                    hasattr(sampler, "_folding_model")
+                    and sampler._folding_model is not None
+                ):
+                    sampler._folding_model = sampler._folding_model.cpu()
+                    del sampler._folding_model
+
+                # Clean up experiment object and its model
+                if hasattr(sampler, "exp") and sampler.exp is not None:
+                    if hasattr(sampler.exp, "model") and sampler.exp.model is not None:
+                        sampler.exp.model = sampler.exp.model.cpu()
+                        del sampler.exp.model
+                    if (
+                        hasattr(sampler.exp, "_model")
+                        and sampler.exp._model is not None
+                    ):
+                        sampler.exp._model = sampler.exp._model.cpu()
+                        del sampler.exp._model
+                    del sampler.exp
+
+                # Clean up flow matcher
+                if hasattr(sampler, "flow_matcher"):
+                    del sampler.flow_matcher
+
+                # Clean up inference method
+                if hasattr(sampler, "inference_method"):
+                    del sampler.inference_method
+
+                # Delete the sampler object itself
+                del sampler
+
+                # Force garbage collection
+                import gc
+
+                gc.collect()
+
+                # Force GPU memory cleanup
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
 
-                # Log memory after cleanup
-                self.log_gpu_memory(f"After sample {sample_idx + 1} cleanup")
+                self.log_gpu_memory(f"After explicit cleanup for {method_name}")
 
-            except Exception as e:
-                self.logger.error(f"Error in sample {sample_idx}: {e}")
-                scores.append(float("nan"))
-
-                # Clear GPU memory even on error
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-        total_time = time.time() - start_time
-
-        # Calculate statistics
-        valid_scores = [s for s in scores if not np.isnan(s)]
-        if valid_scores:
-            mean_score = np.mean(valid_scores)
-            std_score = np.std(valid_scores)
-            max_score = np.max(valid_scores)
-            min_score = np.min(valid_scores)
-        else:
-            mean_score = std_score = max_score = min_score = float("nan")
-
-        result = {
-            "method": method_name,
-            "noise_parameter": noise_param,
-            "config": config,
-            "num_samples": len(valid_scores),
-            "mean_score": mean_score,
-            "std_score": std_score,
-            "max_score": max_score,
-            "min_score": min_score,
-            "total_time": total_time,
-            "time_per_sample": total_time / self.args.num_samples,
-            "scores": scores,
-            "scoring_function": self.args.scoring_function,
-        }
-
-        self.logger.info(
-            f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
-        )
-
-        # Log memory after experiment completion
-        self.log_gpu_memory(f"After {method_name} experiment complete")
-
-        return result
+            except Exception as cleanup_error:
+                self.logger.warning(f"Error during sampler cleanup: {cleanup_error}")
 
     def run_all_experiments(self):
         """Run all experiments with different methods and noise levels."""
