@@ -228,7 +228,9 @@ class DiversityNoiseExperimentRunner:
     def compute_pairwise_distances(self, samples: List[Dict[str, Any]]) -> List[float]:
         """Compute pairwise RMSD distances between all samples in a batch."""
         from tools.analysis import metrics
+        from foldflow.data import residue_constants
 
+        CA_IDX = residue_constants.atom_order["CA"]
         distances = []
         n_samples = len(samples)
 
@@ -238,9 +240,16 @@ class DiversityNoiseExperimentRunner:
                 prot_i = samples[i]["prot_traj"][-1]  # Final frame
                 prot_j = samples[j]["prot_traj"][-1]  # Final frame
 
+                self.logger.debug(
+                    f"prot_i shape: {prot_i.shape}, prot_j shape: {prot_j.shape}"
+                )
+
                 # Use CA atoms for RMSD calculation
-                ca_i = prot_i[:, 1, :]  # CA atoms (index 1)
-                ca_j = prot_j[:, 1, :]  # CA atoms (index 1)
+                ca_i = prot_i[:, CA_IDX, :]  # CA atoms using proper index
+                ca_j = prot_j[:, CA_IDX, :]  # CA atoms using proper index
+
+                self.logger.debug(f"ca_i shape: {ca_i.shape}, ca_j shape: {ca_j.shape}")
+
                 # Compute RMSD
                 rmsd = metrics.calc_aligned_rmsd(ca_i, ca_j)
                 distances.append(rmsd)

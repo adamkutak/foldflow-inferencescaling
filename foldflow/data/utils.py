@@ -450,7 +450,6 @@ def parse_pdb_feats(
 
 
 def rigid_transform_3D(A, B, verbose=False):
-    print("rigid_transform_3D called. A shape:", A.shape, "B shape:", B.shape)
     # Transforms A to look like B
     # https://github.com/nghiaho12/rigid_transform_3D
     assert A.shape == B.shape
@@ -499,5 +498,4 @@ def rigid_transform_3D(A, B, verbose=False):
     t = -R @ centroid_A + centroid_B
     optimal_A = R @ A + t
 
-    print("Returning 4 values from rigid_transform_3D")
     return optimal_A.T, R, t, reflection_detected
