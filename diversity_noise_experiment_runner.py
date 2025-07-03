@@ -244,8 +244,24 @@ class DiversityNoiseExperimentRunner:
                     ca_i = prot_i[:, 1, :]  # CA atoms (index 1)
                     ca_j = prot_j[:, 1, :]  # CA atoms (index 1)
 
+                    # Debug: print shapes and a few values
+                    self.logger.info(
+                        f"Pair ({i},{j}): ca_i shape {ca_i.shape}, ca_j shape {ca_j.shape}"
+                    )
+                    self.logger.info(
+                        f"Pair ({i},{j}): ca_i sample {ca_i[:3]}, ca_j sample {ca_j[:3]}"
+                    )
+
+                    if ca_i.shape != ca_j.shape:
+                        self.logger.warning(
+                            f"CA shapes do not match for pair ({i},{j}): {ca_i.shape} vs {ca_j.shape}"
+                        )
+                    if ca_i.size == 0 or ca_j.size == 0:
+                        self.logger.warning(f"Empty CA array for pair ({i},{j})")
+
                     # Compute RMSD
                     rmsd = metrics.calc_aligned_rmsd(ca_i, ca_j)
+                    self.logger.info(f"Pair ({i},{j}): RMSD = {rmsd}")
                     distances.append(rmsd)
 
                 except Exception as e:
