@@ -234,50 +234,27 @@ class DiversityNoiseExperimentRunner:
         distances = []
         n_samples = len(samples)
 
-        self.logger.info(f"Computing pairwise distances for {n_samples} samples")
-        self.logger.info(f"CA_IDX = {CA_IDX}")
-
         for i in range(n_samples):
             for j in range(i + 1, n_samples):
-                self.logger.info(f"Computing RMSD between samples {i} and {j}")
-
-                # Debug sample structure
-                self.logger.info(f"Sample {i} keys: {list(samples[i].keys())}")
-                self.logger.info(f"Sample {j} keys: {list(samples[j].keys())}")
-
                 # Extract protein trajectories (final structures)
                 prot_traj_i = samples[i]["prot_traj"]
                 prot_traj_j = samples[j]["prot_traj"]
 
-                self.logger.info(f"prot_traj_{i} shape: {prot_traj_i.shape}")
-                self.logger.info(f"prot_traj_{j} shape: {prot_traj_j.shape}")
-
                 prot_i = prot_traj_i[-1]  # Final frame
                 prot_j = prot_traj_j[-1]  # Final frame
-
-                self.logger.info(f"Final frame prot_i shape: {prot_i.shape}")
-                self.logger.info(f"Final frame prot_j shape: {prot_j.shape}")
 
                 # Remove batch dimension if present
                 if prot_i.ndim == 4:  # (1, N_residues, 37, 3)
                     prot_i = prot_i[0]  # (N_residues, 37, 3)
                     prot_j = prot_j[0]  # (N_residues, 37, 3)
 
-                self.logger.info(f"After squeeze prot_i shape: {prot_i.shape}")
-                self.logger.info(f"After squeeze prot_j shape: {prot_j.shape}")
-
                 # Use CA atoms for RMSD calculation - extract CA atoms from all residues
                 ca_i = prot_i[:, CA_IDX, :]  # Shape: (N_residues, 3)
                 ca_j = prot_j[:, CA_IDX, :]  # Shape: (N_residues, 3)
 
-                self.logger.info(f"ca_i shape: {ca_i.shape}")
-                self.logger.info(f"ca_j shape: {ca_j.shape}")
-
                 # Compute RMSD
                 rmsd = metrics.calc_aligned_rmsd(ca_i, ca_j)
                 distances.append(rmsd)
-
-                self.logger.info(f"RMSD between samples {i} and {j}: {rmsd}")
 
         return distances
 
