@@ -1,4 +1,5 @@
-""" Metrics. """
+"""Metrics."""
+
 import mdtraj as md
 import numpy as np
 import tree
@@ -71,7 +72,9 @@ def calc_mdtraj_metrics(pdb_path):
 
 
 def calc_aligned_rmsd(pos_1, pos_2):
+    print("Calling rigid_transform_3D with shapes:", pos_1.shape, pos_2.shape)
     aligned_pos_1 = du.rigid_transform_3D(pos_1, pos_2)[0]
+    print("aligned_pos_1 shape:", aligned_pos_1.shape)
     return np.mean(np.linalg.norm(aligned_pos_1 - pos_2, axis=-1))
 
 
