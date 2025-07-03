@@ -445,7 +445,7 @@ def main():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=2,
+        default=128,
         help="Number of samples to generate per method",
     )
 
@@ -468,7 +468,7 @@ def main():
         "--noise_scales",
         type=float,
         nargs="+",
-        default=[0.02, 0.05, 0.1, 0.2],
+        default=[0.02, 0.1, 0.4, 0.8, 1.6],
         help="List of noise scales to test for SDE method (default: [0.01, 0.02, 0.05, 0.1, 0.2])",
     )
 
@@ -476,7 +476,7 @@ def main():
         "--lambda_divs",
         type=float,
         nargs="+",
-        default=[0.1, 0.2, 0.4, 0.8, 1.0],
+        default=[0.1, 0.4, 0.8, 1.6],
         help="List of lambda values to test for divergence-free method (default: [0.1, 0.2, 0.4, 0.8, 1.0])",
     )
 
