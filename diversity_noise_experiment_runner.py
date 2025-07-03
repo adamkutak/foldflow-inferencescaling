@@ -245,7 +245,7 @@ class DiversityNoiseExperimentRunner:
                     ca_j = prot_j[:, 1, :]  # CA atoms (index 1)
 
                     # Compute RMSD
-                    rmsd = metrics.compute_rmsd(ca_i, ca_j)
+                    rmsd = metrics.calc_aligned_rmsd(ca_i, ca_j)
                     distances.append(rmsd)
 
                 except Exception as e:
