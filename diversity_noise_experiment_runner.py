@@ -258,9 +258,17 @@ class DiversityNoiseExperimentRunner:
                 self.logger.info(f"Final frame prot_i shape: {prot_i.shape}")
                 self.logger.info(f"Final frame prot_j shape: {prot_j.shape}")
 
-                # Use CA atoms for RMSD calculation
-                ca_i = prot_i[:, CA_IDX, :]  # CA atoms using proper index
-                ca_j = prot_j[:, CA_IDX, :]  # CA atoms using proper index
+                # Remove batch dimension if present
+                if prot_i.ndim == 4:  # (1, N_residues, 37, 3)
+                    prot_i = prot_i[0]  # (N_residues, 37, 3)
+                    prot_j = prot_j[0]  # (N_residues, 37, 3)
+
+                self.logger.info(f"After squeeze prot_i shape: {prot_i.shape}")
+                self.logger.info(f"After squeeze prot_j shape: {prot_j.shape}")
+
+                # Use CA atoms for RMSD calculation - extract CA atoms from all residues
+                ca_i = prot_i[:, CA_IDX, :]  # Shape: (N_residues, 3)
+                ca_j = prot_j[:, CA_IDX, :]  # Shape: (N_residues, 3)
 
                 self.logger.info(f"ca_i shape: {ca_i.shape}")
                 self.logger.info(f"ca_j shape: {ca_j.shape}")
