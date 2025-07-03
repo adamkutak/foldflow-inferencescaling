@@ -120,26 +120,15 @@ class SimpleNoiseExperimentRunner:
 
         return Sampler(conf)
 
-    def log_gpu_memory(self, stage: str, device=None):
+    def log_gpu_memory(self, stage: str):
         """Log current GPU memory usage."""
         if torch.cuda.is_available():
-            if device is not None:
-                # Use the specific device
-                device_id = (
-                    device if isinstance(device, int) else int(device.split(":")[1])
-                )
-                allocated = torch.cuda.memory_allocated(device_id) / 1024**3  # GB
-                cached = torch.cuda.memory_reserved(device_id) / 1024**3  # GB
-                self.logger.info(
-                    f"GPU Memory [{stage}] on {device}: Allocated={allocated:.2f}GB, Cached={cached:.2f}GB"
-                )
-            else:
-                # Use default device
-                allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-                cached = torch.cuda.memory_reserved() / 1024**3  # GB
-                self.logger.info(
-                    f"GPU Memory [{stage}]: Allocated={allocated:.2f}GB, Cached={cached:.2f}GB"
-                )
+            device_id = self.args.gpu_id
+            allocated = torch.cuda.memory_allocated(device_id) / 1024**3  # GB
+            cached = torch.cuda.memory_reserved(device_id) / 1024**3  # GB
+            self.logger.info(
+                f"GPU Memory [{stage}] on cuda:{device_id}: Allocated={allocated:.2f}GB, Cached={cached:.2f}GB"
+            )
 
     def run_single_experiment(self, method_config: Dict[str, Any]) -> Dict[str, Any]:
         """Run a single experiment with given method configuration."""
@@ -157,15 +146,8 @@ class SimpleNoiseExperimentRunner:
         # Create sampler
         sampler = self.create_sampler(method_config)
 
-        # Get the device the sampler is using
-        sampler_device = sampler.device
-        self.logger.info(f"Sampler using device: {sampler_device}")
-
-        # Store device for use in run_all_experiments
-        self._last_sampler_device = sampler_device
-
-        # Log memory after creating sampler (on the correct device)
-        self.log_gpu_memory(f"After creating sampler for {method_name}", sampler_device)
+        # Log memory after creating sampler
+        self.log_gpu_memory(f"After creating sampler for {method_name}")
 
         # Track timing and results
         start_time = time.time()
@@ -175,7 +157,7 @@ class SimpleNoiseExperimentRunner:
             self.logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
 
             # Log memory before sample
-            self.log_gpu_memory(f"Before sample {sample_idx + 1}", sampler_device)
+            self.log_gpu_memory(f"Before sample {sample_idx + 1}")
 
             try:
                 # Generate sample
@@ -184,9 +166,7 @@ class SimpleNoiseExperimentRunner:
                 sample_time = time.time() - sample_start
 
                 # Log memory after sample generation
-                self.log_gpu_memory(
-                    f"After sample {sample_idx + 1} generation", sampler_device
-                )
+                self.log_gpu_memory(f"After sample {sample_idx + 1} generation")
 
                 # Extract sample and score
                 if isinstance(sample_result, dict) and "sample" in sample_result:
@@ -206,9 +186,7 @@ class SimpleNoiseExperimentRunner:
                     score = score_fn(sample_output, self.args.sample_length)
 
                 # Log memory after scoring
-                self.log_gpu_memory(
-                    f"After sample {sample_idx + 1} scoring", sampler_device
-                )
+                self.log_gpu_memory(f"After sample {sample_idx + 1} scoring")
 
                 scores.append(score)
                 self.logger.info(f"    Score: {score:.4f}, Time: {sample_time:.2f}s")
@@ -218,9 +196,7 @@ class SimpleNoiseExperimentRunner:
                     torch.cuda.empty_cache()
 
                 # Log memory after cleanup
-                self.log_gpu_memory(
-                    f"After sample {sample_idx + 1} cleanup", sampler_device
-                )
+                self.log_gpu_memory(f"After sample {sample_idx + 1} cleanup")
 
             except Exception as e:
                 self.logger.error(f"Error in sample {sample_idx}: {e}")
@@ -262,7 +238,7 @@ class SimpleNoiseExperimentRunner:
         )
 
         # Log memory after experiment completion
-        self.log_gpu_memory(f"After {method_name} experiment complete", sampler_device)
+        self.log_gpu_memory(f"After {method_name} experiment complete")
 
         return result
 
@@ -298,28 +274,21 @@ class SimpleNoiseExperimentRunner:
                 }
             )
 
-        # Track the device being used
-        device_used = None
-
         # Run all experiments
         for i, exp_config in enumerate(experiments):
             self.logger.info(
                 f"Starting experiment {i+1}/{len(experiments)}: {exp_config['method']}"
             )
-            self.log_gpu_memory(f"Before experiment {i+1}", device_used)
+            self.log_gpu_memory(f"Before experiment {i+1}")
 
             try:
                 result = self.run_single_experiment(exp_config)
                 self.results.append(result)
 
-                # Get device from the first successful experiment
-                if device_used is None and hasattr(self, "_last_sampler_device"):
-                    device_used = self._last_sampler_device
-
             except Exception as e:
                 self.logger.error(f"Failed experiment {exp_config}: {e}")
 
-            self.log_gpu_memory(f"After experiment {i+1}", device_used)
+            self.log_gpu_memory(f"After experiment {i+1}")
 
             # Force garbage collection between experiments
             import gc
@@ -328,7 +297,7 @@ class SimpleNoiseExperimentRunner:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            self.log_gpu_memory(f"After experiment {i+1} cleanup", device_used)
+            self.log_gpu_memory(f"After experiment {i+1} cleanup")
 
         # Save results
         self.save_results()
