@@ -120,16 +120,6 @@ class SimpleNoiseExperimentRunner:
 
         return Sampler(conf)
 
-    def log_gpu_memory(self, stage: str):
-        """Log current GPU memory usage."""
-        if torch.cuda.is_available():
-            device_id = self.args.gpu_id
-            allocated = torch.cuda.memory_allocated(device_id) / 1024**3  # GB
-            cached = torch.cuda.memory_reserved(device_id) / 1024**3  # GB
-            self.logger.info(
-                f"GPU Memory [{stage}] on cuda:{device_id}: Allocated={allocated:.2f}GB, Cached={cached:.2f}GB"
-            )
-
     def run_single_experiment(self, method_config: Dict[str, Any]) -> Dict[str, Any]:
         """Run a single experiment with given method configuration."""
         method_name = method_config["method"]
@@ -140,14 +130,8 @@ class SimpleNoiseExperimentRunner:
             f"Running experiment: {method_name} with noise parameter {noise_param}"
         )
 
-        # Log memory before creating sampler
-        self.log_gpu_memory(f"Before creating sampler for {method_name}")
-
         # Create sampler
         sampler = self.create_sampler(method_config)
-
-        # Log memory after creating sampler
-        self.log_gpu_memory(f"After creating sampler for {method_name}")
 
         try:
             # Track timing and results
@@ -157,9 +141,6 @@ class SimpleNoiseExperimentRunner:
             for sample_idx in range(self.args.num_samples):
                 self.logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
 
-                # Log memory before sample
-                self.log_gpu_memory(f"Before sample {sample_idx + 1}")
-
                 try:
                     # Generate sample
                     sample_start = time.time()
@@ -167,9 +148,6 @@ class SimpleNoiseExperimentRunner:
                         self.args.sample_length
                     )
                     sample_time = time.time() - sample_start
-
-                    # Log memory after sample generation
-                    self.log_gpu_memory(f"After sample {sample_idx + 1} generation")
 
                     # Extract sample and score
                     if isinstance(sample_result, dict) and "sample" in sample_result:
@@ -188,28 +166,14 @@ class SimpleNoiseExperimentRunner:
                         )
                         score = score_fn(sample_output, self.args.sample_length)
 
-                    # Log memory after scoring
-                    self.log_gpu_memory(f"After sample {sample_idx + 1} scoring")
-
                     scores.append(score)
                     self.logger.info(
                         f"    Score: {score:.4f}, Time: {sample_time:.2f}s"
                     )
 
-                    # Clear GPU memory after each sample
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                    # Log memory after cleanup
-                    self.log_gpu_memory(f"After sample {sample_idx + 1} cleanup")
-
                 except Exception as e:
                     self.logger.error(f"Error in sample {sample_idx}: {e}")
                     scores.append(float("nan"))
-
-                    # Clear GPU memory even on error
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
 
             total_time = time.time() - start_time
 
@@ -241,9 +205,6 @@ class SimpleNoiseExperimentRunner:
             self.logger.info(
                 f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
             )
-
-            # Log memory after experiment completion
-            self.log_gpu_memory(f"After {method_name} experiment complete")
 
             return result
 
@@ -298,17 +259,12 @@ class SimpleNoiseExperimentRunner:
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
 
-                self.log_gpu_memory(f"After explicit cleanup for {method_name}")
-
             except Exception as cleanup_error:
                 self.logger.warning(f"Error during sampler cleanup: {cleanup_error}")
 
     def run_all_experiments(self):
         """Run all experiments with different methods and noise levels."""
         experiments = []
-
-        # Log initial memory
-        self.log_gpu_memory("Initial - before any experiments")
 
         # 1. Baseline: Standard sampling
         experiments.append({"method": "standard", "config": {}})
@@ -340,7 +296,6 @@ class SimpleNoiseExperimentRunner:
             self.logger.info(
                 f"Starting experiment {i+1}/{len(experiments)}: {exp_config['method']}"
             )
-            self.log_gpu_memory(f"Before experiment {i+1}")
 
             try:
                 result = self.run_single_experiment(exp_config)
@@ -349,8 +304,6 @@ class SimpleNoiseExperimentRunner:
             except Exception as e:
                 self.logger.error(f"Failed experiment {exp_config}: {e}")
 
-            self.log_gpu_memory(f"After experiment {i+1}")
-
             # Force garbage collection between experiments
             import gc
 
@@ -358,7 +311,7 @@ class SimpleNoiseExperimentRunner:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            self.log_gpu_memory(f"After experiment {i+1} cleanup")
+            self.logger.info(f"After experiment {i+1} cleanup")
 
         # Save results
         self.save_results()
