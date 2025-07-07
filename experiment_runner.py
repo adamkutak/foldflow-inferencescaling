@@ -257,6 +257,22 @@ class ExperimentRunner:
                 }
             )
 
+        # Random Search + Divergence-free ODE with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "random_search_divfree",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": 1,  # Always keep only 1 as specified
+                        "lambda_div": self.args.lambda_div,
+                        "selector": self.args.scoring_function,
+                        "branch_start_time": 0.0,
+                        "branch_interval": self.args.branch_interval,
+                    },
+                }
+            )
+
         # Run all experiments
         for exp_config in experiments:
             try:
@@ -450,7 +466,7 @@ def main():
         "--branch_counts",
         type=int,
         nargs="+",
-        default=[2, 4],
+        default=[2, 4, 8],
         help="List of branch counts to use for experiments (default: [2, 4, 8])",
     )
 

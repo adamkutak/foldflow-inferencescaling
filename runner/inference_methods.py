@@ -1629,6 +1629,397 @@ class DivergenceFreeSimpleInference(InferenceMethod):
         }
 
 
+class RandomSearchDivFreeInference(InferenceMethod):
+    """Combined random search and divergence-free ODE branching method.
+
+    First performs random search over N initial noises to select the best ones,
+    then uses those selected noises as starting points for divergence-free ODE branching.
+    """
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using random search + divergence-free ODE branching."""
+        num_branches = self.config.get("num_branches", 4)
+        num_keep = self.config.get("num_keep", 1)
+        lambda_div = self.config.get("lambda_div", 0.1)
+        selector = self.config.get("selector", "tm_score")
+        branch_start_time = self.config.get("branch_start_time", 0.0)
+        branch_interval = self.config.get("branch_interval", 0.05)
+
+        self._log.info(
+            f"Running random search + div-free ODE: {num_branches} random initial noises -> "
+            f"{num_branches} div-free branches, keeping {num_keep}"
+        )
+
+        # Step 1: Random search to select best initial noises
+        self._log.info(f"Phase 1: Random search over {num_branches} initial noises")
+
+        selected_noises = self._random_search_phase(
+            sample_length, num_branches, selector, context
+        )
+
+        # Step 2: Use selected noises for divergence-free ODE branching
+        self._log.info(
+            f"Phase 2: Div-free ODE branching with {len(selected_noises)} selected noises"
+        )
+
+        best_sample = self._divfree_branching_phase(
+            selected_noises,
+            num_branches,
+            num_keep,
+            lambda_div,
+            selector,
+            sample_length,
+            branch_start_time,
+            branch_interval,
+            context,
+        )
+
+        return best_sample
+
+    def _random_search_phase(self, sample_length, num_random, selector, context):
+        """Phase 1: Random search to select best initial noises."""
+        score_fn = self.get_score_function(selector)
+        candidates = []
+
+        for i in range(num_random):
+            # Generate random initial features
+            res_mask = np.ones(sample_length)
+            fixed_mask = np.zeros_like(res_mask)
+            aatype = torch.zeros(sample_length, dtype=torch.int32)
+            chain_idx = torch.zeros_like(aatype)
+
+            ref_sample = self.sampler.flow_matcher.sample_ref(
+                n_samples=sample_length,
+                as_tensor_7=True,
+            )
+            res_idx = torch.arange(1, sample_length + 1)
+
+            init_feats = {
+                "res_mask": res_mask,
+                "seq_idx": res_idx,
+                "fixed_mask": fixed_mask,
+                "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+                "sc_ca_t": np.zeros((sample_length, 3)),
+                "aatype": aatype,
+                "chain_idx": chain_idx,
+                **ref_sample,
+            }
+
+            # Add batch dimension and move to GPU
+            init_feats = tree.map_structure(
+                lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+            )
+            init_feats = tree.map_structure(
+                lambda x: x[None].to(self.sampler.device), init_feats
+            )
+
+            # Run standard sampling to completion
+            sample_out = self.sampler.exp.inference_fn(
+                init_feats,
+                num_t=self.sampler._fm_conf.num_t,
+                min_t=self.sampler._fm_conf.min_t,
+                aux_traj=True,
+                noise_scale=self.sampler._fm_conf.noise_scale,
+                context=context,
+            )
+
+            # Remove batch dimension
+            sample_result = tree.map_structure(lambda x: x[:, 0], sample_out)
+
+            # Score the sample
+            score = score_fn(sample_result, sample_length)
+
+            candidates.append(
+                {"init_feats": init_feats, "sample": sample_result, "score": score}
+            )
+
+            self._log.debug(f"  Random candidate {i+1}: score={score:.4f}")
+
+        # Sort by score (higher is better for both tm_score and negative rmsd)
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        # Keep the best initial noises for branching
+        # Select a reasonable number based on how many random samples we evaluated
+        # For small num_random (2-4), keep 1-2; for larger (8+), keep 2-3
+        if num_random <= 2:
+            num_selected = 1
+        elif num_random <= 4:
+            num_selected = 2
+        else:
+            num_selected = min(3, num_random // 3)  # Keep about 1/3, max 3
+
+        selected = candidates[:num_selected]
+
+        scores_str = [f"{c['score']:.4f}" for c in selected]
+        self._log.info(
+            f"Selected {len(selected)} best initial noises with scores: {scores_str}"
+        )
+
+        return [c["init_feats"] for c in selected]
+
+    def _divfree_branching_phase(
+        self,
+        selected_noises,
+        num_branches,
+        num_keep,
+        lambda_div,
+        selector,
+        sample_length,
+        branch_start_time,
+        branch_interval,
+        context,
+    ):
+        """Phase 2: Divergence-free ODE branching from selected noises."""
+        score_fn = self.get_score_function(selector)
+        all_results = []
+
+        for i, init_noise in enumerate(selected_noises):
+            self._log.debug(f"  Running div-free branching from selected noise {i+1}")
+
+            # Run divergence-free path exploration starting from this selected noise
+            result = self._divergence_free_path_exploration_inference(
+                init_noise,
+                num_branches,
+                num_keep,
+                lambda_div,
+                score_fn,
+                sample_length,
+                branch_start_time,
+                branch_interval,
+                context,
+            )
+
+            all_results.extend(result)
+
+        # Select the best overall result
+        if all_results:
+            best_result = max(all_results, key=lambda x: x["score"])
+            self._log.info(f"Best overall score: {best_result['score']:.4f}")
+            return best_result["sample"]
+        else:
+            # Fallback to standard sampling
+            self._log.warning(
+                "No valid results from branching phase, falling back to standard"
+            )
+            return self.sampler._base_sample(sample_length, context)
+
+    def _divergence_free_path_exploration_inference(
+        self,
+        data_init,
+        num_branches,
+        num_keep,
+        lambda_div,
+        score_fn,
+        sample_length,
+        branch_start_time,
+        branch_interval,
+        context,
+    ):
+        """Divergence-free path exploration inference (adapted from DivergenceFreeODEInference)."""
+        sample_feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
+        )
+        device = sample_feats["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Track active trajectories
+        active_trajectories = [
+            {
+                "feats": copy.deepcopy(sample_feats),
+                "trajectory": [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))],
+                "branch_id": 0,
+                "parent_id": None,
+                "completed": False,
+                "final_sample": None,
+                "score": None,
+            }
+        ]
+
+        completed_trajectories = []
+        branch_counter = 1
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(reverse_steps):
+                current_time = t
+                remaining_steps = len(reverse_steps) - step_idx - 1
+
+                # Determine if we should branch at this step
+                should_branch = (
+                    current_time >= branch_start_time
+                    and len(active_trajectories) < num_branches
+                    and remaining_steps > 0
+                    and (
+                        branch_interval == 0.0
+                        or step_idx % max(1, int(branch_interval / dt)) == 0
+                    )
+                )
+
+                new_trajectories = []
+
+                for traj in active_trajectories:
+                    if traj["completed"]:
+                        continue
+
+                    # Set time features
+                    traj["feats"] = self.sampler.exp._set_t_feats(
+                        traj["feats"], t, torch.ones((1,)).to(device)
+                    )
+                    model_out = self.sampler.model(traj["feats"])
+
+                    rot_vectorfield = model_out["rot_vectorfield"]
+                    trans_vectorfield = model_out["trans_vectorfield"]
+                    rigid_pred = model_out["rigids"]
+                    psi_pred = model_out["psi"]
+
+                    fixed_mask = traj["feats"]["fixed_mask"] * traj["feats"]["res_mask"]
+                    flow_mask = (1 - traj["feats"]["fixed_mask"]) * traj["feats"][
+                        "res_mask"
+                    ]
+
+                    # Create divergence-free noise for branching
+                    if should_branch and len(new_trajectories) < num_branches - len(
+                        active_trajectories
+                    ):
+                        # Create branched trajectory with divergence-free noise
+                        branch_feats = tree.map_structure(
+                            lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                            traj["feats"],
+                        )
+
+                        # Apply divergence-free noise
+                        noise_rot = torch.randn_like(rot_vectorfield) * lambda_div
+                        noise_trans = torch.randn_like(trans_vectorfield) * lambda_div
+
+                        # Make noise divergence-free (simplified approach)
+                        noise_rot = noise_rot - torch.mean(
+                            noise_rot, dim=-2, keepdim=True
+                        )
+                        noise_trans = noise_trans - torch.mean(
+                            noise_trans, dim=-2, keepdim=True
+                        )
+
+                        # Apply noise to vector fields
+                        noisy_rot_vectorfield = rot_vectorfield + noise_rot
+                        noisy_trans_vectorfield = trans_vectorfield + noise_trans
+
+                        # Apply flow step with noisy vector fields
+                        rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                            rigid_t=ru.Rigid.from_tensor_7(branch_feats["rigids_t"]),
+                            rot_vectorfield=du.move_to_np(noisy_rot_vectorfield),
+                            trans_vectorfield=du.move_to_np(noisy_trans_vectorfield),
+                            flow_mask=du.move_to_np(flow_mask),
+                            t=t,
+                            dt=dt,
+                            center=True,
+                            noise_scale=1.0,
+                        )
+
+                        branch_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                        # Create new trajectory
+                        new_traj = {
+                            "feats": branch_feats,
+                            "trajectory": traj["trajectory"]
+                            + [du.move_to_np(rigids_t.to_tensor_7())],
+                            "branch_id": branch_counter,
+                            "parent_id": traj["branch_id"],
+                            "completed": False,
+                            "final_sample": None,
+                            "score": None,
+                        }
+                        new_trajectories.append(new_traj)
+                        branch_counter += 1
+
+                    # Continue main trajectory without noise
+                    rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                        rigid_t=ru.Rigid.from_tensor_7(traj["feats"]["rigids_t"]),
+                        rot_vectorfield=du.move_to_np(rot_vectorfield),
+                        trans_vectorfield=du.move_to_np(trans_vectorfield),
+                        flow_mask=du.move_to_np(flow_mask),
+                        t=t,
+                        dt=dt,
+                        center=True,
+                        noise_scale=1.0,
+                    )
+
+                    traj["feats"]["rigids_t"] = rigids_t.to_tensor_7().to(device)
+                    traj["trajectory"].append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Add new trajectories
+                active_trajectories.extend(new_trajectories)
+
+                # Check if we need to prune trajectories
+                if len(active_trajectories) > num_branches:
+                    # Simulate to completion and score to decide which to keep
+                    temp_scores = []
+                    for traj in active_trajectories:
+                        if remaining_steps > 0:
+                            simulated_sample = self._simulate_to_completion(
+                                traj["feats"], t, dt, remaining_steps, context
+                            )
+                        else:
+                            # Already at the end
+                            simulated_sample = self._extract_final_sample(traj["feats"])
+
+                        score = score_fn(simulated_sample, sample_length)
+                        temp_scores.append((score, traj))
+
+                    # Keep the best num_branches trajectories
+                    temp_scores.sort(key=lambda x: x[0], reverse=True)
+                    active_trajectories = [
+                        traj for _, traj in temp_scores[:num_branches]
+                    ]
+
+        # Complete all remaining trajectories
+        results = []
+        for traj in active_trajectories:
+            if not traj["completed"]:
+                final_sample = self._extract_final_sample(traj["feats"])
+                score = score_fn(final_sample, sample_length)
+
+                results.append(
+                    {
+                        "sample": final_sample,
+                        "score": score,
+                        "branch_id": traj["branch_id"],
+                    }
+                )
+
+        return results
+
+    def _extract_final_sample(self, feats):
+        """Extract final sample from features."""
+        with torch.no_grad():
+            # Get final structure prediction
+            model_out = self.sampler.model(feats)
+            rigid_pred = model_out["rigids"]
+            psi_pred = model_out["psi"]
+
+            # Compute backbone structure
+            atom37_0 = all_atom.compute_backbone(
+                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+            )[0]
+
+            # Create trajectory-like output (simplified)
+            prot_traj = du.move_to_np(atom37_0)[None]  # Add time dimension
+            rigid_traj = du.move_to_np(rigid_pred)[None]
+
+            return {
+                "prot_traj": prot_traj,
+                "rigid_traj": rigid_traj,
+                "trans_traj": du.move_to_np(rigid_pred[..., 4:])[None],
+                "psi_pred": psi_pred[None] if psi_pred is not None else None,
+                "rigid_0_traj": prot_traj,
+            }
+
+
 def get_inference_method(
     method_name: str, sampler, config: Dict[str, Any]
 ) -> InferenceMethod:
@@ -1640,6 +2031,7 @@ def get_inference_method(
         "divergence_free_ode": DivergenceFreeODEInference,
         "sde_simple": SDESimpleInference,
         "divergence_free_simple": DivergenceFreeSimpleInference,
+        "random_search_divfree": RandomSearchDivFreeInference,
     }
 
     if method_name not in methods:
