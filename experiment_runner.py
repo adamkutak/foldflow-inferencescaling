@@ -408,7 +408,7 @@ def main():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=2,
+        default=16,
         help="Number of samples to generate per method",
     )
 
@@ -430,14 +430,14 @@ def main():
     parser.add_argument(
         "--noise_scale",
         type=float,
-        default=0.05,
+        default=0.1,
         help="Noise scale for SDE path exploration",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.1,
+        default=0.35,
         help="Lambda for divergence-free vector fields",
     )
 
@@ -451,7 +451,7 @@ def main():
     parser.add_argument(
         "--gpu_id",
         type=int,
-        default=1,
+        default=0,
         help="GPU ID to use for inference (overrides config file)",
     )
 
