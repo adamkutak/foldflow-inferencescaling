@@ -765,10 +765,23 @@ class SDEPathExplorationInference(InferenceMethod):
 
             if len(current_samples) == 1:
                 final_sample = current_samples[0]
-                # Create a simple trajectory for evaluation
+                # Create a simple trajectory for evaluation - compute atom37 positions properly
+                with torch.no_grad():
+                    final_sample_copy = self.sampler.exp._set_t_feats(
+                        final_sample, 0.0, torch.ones((1,)).to(device)
+                    )
+                    model_out = self.sampler.model(final_sample_copy)
+                    rigid_pred = model_out["rigids"]
+                    psi_pred = model_out["psi"]
+
+                    # Compute actual atom37 positions
+                    atom37_pos = all_atom.compute_backbone(
+                        ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                    )[0]
+
                 sample_out = {
-                    "prot_traj": final_sample["rigids_t"],
-                    "rigid_0_traj": final_sample["rigids_t"],
+                    "prot_traj": du.move_to_np(atom37_pos),
+                    "rigid_0_traj": du.move_to_np(rigid_pred),
                 }
                 final_branch_score = score_fn(sample_out, sample_length)
                 self._log.info(
@@ -779,10 +792,23 @@ class SDEPathExplorationInference(InferenceMethod):
                 self._log.info(f"  Evaluating {len(current_samples)} final samples...")
                 final_scores = []
                 for i, feats in enumerate(current_samples):
-                    # Create a simple trajectory for evaluation
+                    # Create a simple trajectory for evaluation - compute atom37 positions properly
+                    with torch.no_grad():
+                        feats_copy = self.sampler.exp._set_t_feats(
+                            feats, 0.0, torch.ones((1,)).to(device)
+                        )
+                        model_out = self.sampler.model(feats_copy)
+                        rigid_pred = model_out["rigids"]
+                        psi_pred = model_out["psi"]
+
+                        # Compute actual atom37 positions
+                        atom37_pos = all_atom.compute_backbone(
+                            ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                        )[0]
+
                     sample_out = {
-                        "prot_traj": feats["rigids_t"],
-                        "rigid_0_traj": feats["rigids_t"],
+                        "prot_traj": du.move_to_np(atom37_pos),
+                        "rigid_0_traj": du.move_to_np(rigid_pred),
                     }
                     score = score_fn(sample_out, sample_length)
                     final_scores.append(score)
@@ -1362,16 +1388,30 @@ class DivergenceFreeODEInference(InferenceMethod):
             final_feats = current_samples[0]
 
             # Score the final branch
-            # Create a simple trajectory for evaluation
+            # Create a simple trajectory for evaluation - compute atom37 positions properly
+            with torch.no_grad():
+                final_feats_copy = self.sampler.exp._set_t_feats(
+                    final_feats, 0.0, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(final_feats_copy)
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                # Compute actual atom37 positions
+                atom37_pos = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+
             final_sample_for_eval = {
-                "prot_traj": final_feats["rigids_t"],
-                "rigid_0_traj": final_feats["rigids_t"],
+                "prot_traj": du.move_to_np(atom37_pos),
+                "rigid_0_traj": du.move_to_np(rigid_pred),
             }
             final_branch_score = score_fn(final_sample_for_eval, sample_length)
             self._log.info(f"  Final branch score: {final_branch_score:.4f}")
 
         else:
             final_feats = sample_feats
+            final_branch_score = float("-inf")
             self._log.info(f"  Using initial sample (no branches remained)")
 
         # Compare best complete sample with final branch
