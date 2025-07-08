@@ -438,6 +438,10 @@ class SDEPathExplorationInference(InferenceMethod):
 
         current_samples = [sample_feats]
 
+        # Track the best complete sample encountered during simulation
+        best_complete_sample = None
+        best_complete_score = float("-inf")
+
         # Initialize trajectory collection for final sample
         all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
         all_bb_prots = []
@@ -653,6 +657,11 @@ class SDEPathExplorationInference(InferenceMethod):
                                     f"      Branch {branch_idx}: score = {score:.4f}"
                                 )
 
+                                # Update the best complete sample if this branch is better
+                                if score > best_complete_score:
+                                    best_complete_sample = completed_sample
+                                    best_complete_score = score
+
                             except Exception as e:
                                 self._log.error(
                                     f"      Branch {branch_idx} failed: {e}"
@@ -750,10 +759,21 @@ class SDEPathExplorationInference(InferenceMethod):
                     f"  No branching occurred (branch_start_time={branch_start_time}, branch_interval={branch_interval})"
                 )
 
-            # Return best final sample
+            # Return best final sample - compare final branches with best complete sample
+            final_branch_score = float("-inf")
+            final_branch_sample = None
+
             if len(current_samples) == 1:
                 final_sample = current_samples[0]
-                self._log.info(f"  Using single remaining sample")
+                # Create a simple trajectory for evaluation
+                sample_out = {
+                    "prot_traj": final_sample["rigids_t"],
+                    "rigid_0_traj": final_sample["rigids_t"],
+                }
+                final_branch_score = score_fn(sample_out, sample_length)
+                self._log.info(
+                    f"  Single remaining branch score: {final_branch_score:.4f}"
+                )
             else:
                 # Evaluate all final samples and pick best
                 self._log.info(f"  Evaluating {len(current_samples)} final samples...")
@@ -770,8 +790,26 @@ class SDEPathExplorationInference(InferenceMethod):
 
                 best_idx = np.argmax(final_scores)
                 final_sample = current_samples[best_idx]
+                final_branch_score = final_scores[best_idx]
                 self._log.info(
-                    f"  Selected final sample {best_idx} with score {final_scores[best_idx]:.4f}"
+                    f"  Best final branch {best_idx} score: {final_branch_score:.4f}"
+                )
+
+            # Compare best complete sample with best final branch
+            self._log.info(f"  Best complete sample score: {best_complete_score:.4f}")
+            self._log.info(f"  Best final branch score: {final_branch_score:.4f}")
+
+            if (
+                best_complete_sample is not None
+                and best_complete_score > final_branch_score
+            ):
+                self._log.info(
+                    f"  Using best complete sample (score: {best_complete_score:.4f})"
+                )
+                return best_complete_sample
+            else:
+                self._log.info(
+                    f"  Using final branch trajectory (score: {final_branch_score:.4f})"
                 )
 
             # Flip trajectory so that it starts from t=0 (for visualization)
@@ -922,6 +960,10 @@ class DivergenceFreeODEInference(InferenceMethod):
         )
 
         current_samples = [sample_feats]
+
+        # Track the best complete sample encountered during simulation
+        best_complete_sample = None
+        best_complete_score = float("-inf")
 
         # Initialize trajectory collection for final sample
         all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
@@ -1197,6 +1239,11 @@ class DivergenceFreeODEInference(InferenceMethod):
                                     self._log.info(
                                         f"      Branch {branch_idx}: score = {score:.4f}"
                                     )
+
+                                    # Update the best complete sample if this branch is better
+                                    if score > best_complete_score:
+                                        best_complete_sample = branch_result
+                                        best_complete_score = score
                                 except Exception as e:
                                     self._log.error(
                                         f"      Branch {branch_idx} failed: {e}"
@@ -1307,13 +1354,42 @@ class DivergenceFreeODEInference(InferenceMethod):
                     f"  No branching occurred (branch_start_time={branch_start_time}, branch_interval={branch_interval})"
                 )
 
-        # Return the final sample from the best branch
+        # Return the final sample from the best branch - compare with best complete sample
+        final_branch_score = float("-inf")
+        final_sample_out = None
+
         if current_samples:
             final_feats = current_samples[0]
-            self._log.info(f"  Using single remaining sample")
+
+            # Score the final branch
+            # Create a simple trajectory for evaluation
+            final_sample_for_eval = {
+                "prot_traj": final_feats["rigids_t"],
+                "rigid_0_traj": final_feats["rigids_t"],
+            }
+            final_branch_score = score_fn(final_sample_for_eval, sample_length)
+            self._log.info(f"  Final branch score: {final_branch_score:.4f}")
+
         else:
             final_feats = sample_feats
             self._log.info(f"  Using initial sample (no branches remained)")
+
+        # Compare best complete sample with final branch
+        self._log.info(f"  Best complete sample score: {best_complete_score:.4f}")
+        self._log.info(f"  Final branch score: {final_branch_score:.4f}")
+
+        if (
+            best_complete_sample is not None
+            and best_complete_score > final_branch_score
+        ):
+            self._log.info(
+                f"  Using best complete sample (score: {best_complete_score:.4f})"
+            )
+            return best_complete_sample
+
+        self._log.info(
+            f"  Using final branch trajectory (score: {final_branch_score:.4f})"
+        )
 
         # Complete the simulation if we haven't reached the end
         remaining_steps = [t for t in reverse_steps if t < branch_start_time]
@@ -1829,6 +1905,10 @@ class RandomSearchDivFreeInference(InferenceMethod):
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
         dt = reverse_steps[0] - reverse_steps[1]
 
+        # Track best complete sample encountered during simulation
+        best_complete_sample = None
+        best_complete_score = float("-inf")
+
         # Track active trajectories
         active_trajectories = [
             {
@@ -1971,6 +2051,11 @@ class RandomSearchDivFreeInference(InferenceMethod):
                         score = score_fn(simulated_sample, sample_length)
                         temp_scores.append((score, traj))
 
+                        # Update best complete sample if this is better
+                        if score > best_complete_score:
+                            best_complete_sample = simulated_sample
+                            best_complete_score = score
+
                     # Keep the best num_branches trajectories
                     temp_scores.sort(key=lambda x: x[0], reverse=True)
                     active_trajectories = [
@@ -1984,6 +2069,11 @@ class RandomSearchDivFreeInference(InferenceMethod):
                 final_sample = self._extract_final_sample(traj["feats"])
                 score = score_fn(final_sample, sample_length)
 
+                # Update best complete sample if this is better
+                if score > best_complete_score:
+                    best_complete_sample = final_sample
+                    best_complete_score = score
+
                 results.append(
                     {
                         "sample": final_sample,
@@ -1991,6 +2081,16 @@ class RandomSearchDivFreeInference(InferenceMethod):
                         "branch_id": traj["branch_id"],
                     }
                 )
+
+        # Add the best complete sample to results if it was found during simulation
+        if best_complete_sample is not None:
+            results.append(
+                {
+                    "sample": best_complete_sample,
+                    "score": best_complete_score,
+                    "branch_id": "best_complete",
+                }
+            )
 
         return results
 
