@@ -438,9 +438,9 @@ class SDEPathExplorationInference(InferenceMethod):
 
         current_samples = [sample_feats]
 
-        # Track the best complete sample encountered during simulation
-        best_complete_sample = None
-        best_complete_score = float("-inf")
+        # Track best intermediate sample across all simulations
+        best_intermediate_score = float("-inf")
+        best_intermediate_sample = None
 
         # Initialize trajectory collection for final sample
         all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
@@ -657,10 +657,13 @@ class SDEPathExplorationInference(InferenceMethod):
                                     f"      Branch {branch_idx}: score = {score:.4f}"
                                 )
 
-                                # Update the best complete sample if this branch is better
-                                if score > best_complete_score:
-                                    best_complete_sample = completed_sample
-                                    best_complete_score = score
+                                # Track best intermediate sample
+                                if score > best_intermediate_score:
+                                    best_intermediate_score = score
+                                    best_intermediate_sample = completed_sample
+                                    self._log.info(
+                                        f"      New best intermediate sample: score = {score:.4f}"
+                                    )
 
                             except Exception as e:
                                 self._log.error(
@@ -759,56 +762,35 @@ class SDEPathExplorationInference(InferenceMethod):
                     f"  No branching occurred (branch_start_time={branch_start_time}, branch_interval={branch_interval})"
                 )
 
-            # Return best final sample - compare final branches with best complete sample
-            final_branch_score = float("-inf")
-            final_branch_sample = None
-
+            # Return best final sample
             if len(current_samples) == 1:
                 final_sample = current_samples[0]
-                # Create a simple trajectory for evaluation - compute atom37 positions properly
-                with torch.no_grad():
-                    final_sample_copy = self.sampler.exp._set_t_feats(
-                        final_sample, 0.0, torch.ones((1,)).to(device)
-                    )
-                    model_out = self.sampler.model(final_sample_copy)
-                    rigid_pred = model_out["rigids"]
-                    psi_pred = model_out["psi"]
+                self._log.info(f"  Using single remaining sample")
 
-                    # Compute actual atom37 positions
-                    atom37_pos = all_atom.compute_backbone(
-                        ru.Rigid.from_tensor_7(rigid_pred), psi_pred
-                    )[0]
+                # For single sample, evaluate it and compare with best intermediate
+                if best_intermediate_sample is not None:
+                    sample_out = {
+                        "prot_traj": final_sample["rigids_t"],
+                        "rigid_0_traj": final_sample["rigids_t"],
+                    }
+                    final_score = score_fn(sample_out, sample_length)
+                    self._log.info(f"  Final sample score: {final_score:.4f}")
 
-                sample_out = {
-                    "prot_traj": du.move_to_np(atom37_pos),
-                    "rigid_0_traj": du.move_to_np(rigid_pred),
-                }
-                final_branch_score = score_fn(sample_out, sample_length)
-                self._log.info(
-                    f"  Single remaining branch score: {final_branch_score:.4f}"
-                )
+                    if best_intermediate_score > final_score:
+                        self._log.info(
+                            f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
+                            f"final sample (score: {final_score:.4f})"
+                        )
+                        return best_intermediate_sample
             else:
                 # Evaluate all final samples and pick best
                 self._log.info(f"  Evaluating {len(current_samples)} final samples...")
                 final_scores = []
                 for i, feats in enumerate(current_samples):
-                    # Create a simple trajectory for evaluation - compute atom37 positions properly
-                    with torch.no_grad():
-                        feats_copy = self.sampler.exp._set_t_feats(
-                            feats, 0.0, torch.ones((1,)).to(device)
-                        )
-                        model_out = self.sampler.model(feats_copy)
-                        rigid_pred = model_out["rigids"]
-                        psi_pred = model_out["psi"]
-
-                        # Compute actual atom37 positions
-                        atom37_pos = all_atom.compute_backbone(
-                            ru.Rigid.from_tensor_7(rigid_pred), psi_pred
-                        )[0]
-
+                    # Create a simple trajectory for evaluation
                     sample_out = {
-                        "prot_traj": du.move_to_np(atom37_pos),
-                        "rigid_0_traj": du.move_to_np(rigid_pred),
+                        "prot_traj": feats["rigids_t"],
+                        "rigid_0_traj": feats["rigids_t"],
                     }
                     score = score_fn(sample_out, sample_length)
                     final_scores.append(score)
@@ -816,27 +798,21 @@ class SDEPathExplorationInference(InferenceMethod):
 
                 best_idx = np.argmax(final_scores)
                 final_sample = current_samples[best_idx]
-                final_branch_score = final_scores[best_idx]
+                best_final_score = final_scores[best_idx]
                 self._log.info(
-                    f"  Best final branch {best_idx} score: {final_branch_score:.4f}"
+                    f"  Selected final sample {best_idx} with score {best_final_score:.4f}"
                 )
 
-            # Compare best complete sample with best final branch
-            self._log.info(f"  Best complete sample score: {best_complete_score:.4f}")
-            self._log.info(f"  Best final branch score: {final_branch_score:.4f}")
-
-            if (
-                best_complete_sample is not None
-                and best_complete_score > final_branch_score
-            ):
-                self._log.info(
-                    f"  Using best complete sample (score: {best_complete_score:.4f})"
-                )
-                return best_complete_sample
-            else:
-                self._log.info(
-                    f"  Using final branch trajectory (score: {final_branch_score:.4f})"
-                )
+                # Compare with best intermediate sample
+                if (
+                    best_intermediate_sample is not None
+                    and best_intermediate_score > best_final_score
+                ):
+                    self._log.info(
+                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
+                        f"best final sample (score: {best_final_score:.4f})"
+                    )
+                    return best_intermediate_sample
 
             # Flip trajectory so that it starts from t=0 (for visualization)
             flip = lambda x: np.flip(np.stack(x), (0,))
@@ -870,6 +846,18 @@ class SDEPathExplorationInference(InferenceMethod):
             result = tree.map_structure(
                 lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
             )
+
+            # Final comparison with best intermediate sample
+            if best_intermediate_sample is not None:
+                final_score = score_fn(result, sample_length)
+                self._log.info(f"  Final trajectory score: {final_score:.4f}")
+
+                if best_intermediate_score > final_score:
+                    self._log.info(
+                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
+                        f"final trajectory (score: {final_score:.4f})"
+                    )
+                    return best_intermediate_sample
 
             return result
 
@@ -987,9 +975,9 @@ class DivergenceFreeODEInference(InferenceMethod):
 
         current_samples = [sample_feats]
 
-        # Track the best complete sample encountered during simulation
-        best_complete_sample = None
-        best_complete_score = float("-inf")
+        # Track best intermediate sample across all simulations
+        best_intermediate_score = float("-inf")
+        best_intermediate_sample = None
 
         # Initialize trajectory collection for final sample
         all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
@@ -1266,10 +1254,14 @@ class DivergenceFreeODEInference(InferenceMethod):
                                         f"      Branch {branch_idx}: score = {score:.4f}"
                                     )
 
-                                    # Update the best complete sample if this branch is better
-                                    if score > best_complete_score:
-                                        best_complete_sample = branch_result
-                                        best_complete_score = score
+                                    # Track best intermediate sample
+                                    if score > best_intermediate_score:
+                                        best_intermediate_score = score
+                                        best_intermediate_sample = branch_result
+                                        self._log.info(
+                                            f"      New best intermediate sample: score = {score:.4f}"
+                                        )
+
                                 except Exception as e:
                                     self._log.error(
                                         f"      Branch {branch_idx} failed: {e}"
@@ -1380,56 +1372,29 @@ class DivergenceFreeODEInference(InferenceMethod):
                     f"  No branching occurred (branch_start_time={branch_start_time}, branch_interval={branch_interval})"
                 )
 
-        # Return the final sample from the best branch - compare with best complete sample
-        final_branch_score = float("-inf")
-        final_sample_out = None
-
+        # Return the final sample from the best branch
         if current_samples:
             final_feats = current_samples[0]
+            self._log.info(f"  Using single remaining sample")
 
-            # Score the final branch
-            # Create a simple trajectory for evaluation - compute atom37 positions properly
-            with torch.no_grad():
-                final_feats_copy = self.sampler.exp._set_t_feats(
-                    final_feats, 0.0, torch.ones((1,)).to(device)
-                )
-                model_out = self.sampler.model(final_feats_copy)
-                rigid_pred = model_out["rigids"]
-                psi_pred = model_out["psi"]
+            # For single sample, evaluate it and compare with best intermediate
+            if best_intermediate_sample is not None:
+                sample_out = {
+                    "prot_traj": final_feats["rigids_t"],
+                    "rigid_0_traj": final_feats["rigids_t"],
+                }
+                final_score = score_fn(sample_out, sample_length)
+                self._log.info(f"  Final sample score: {final_score:.4f}")
 
-                # Compute actual atom37 positions
-                atom37_pos = all_atom.compute_backbone(
-                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
-                )[0]
-
-            final_sample_for_eval = {
-                "prot_traj": du.move_to_np(atom37_pos),
-                "rigid_0_traj": du.move_to_np(rigid_pred),
-            }
-            final_branch_score = score_fn(final_sample_for_eval, sample_length)
-            self._log.info(f"  Final branch score: {final_branch_score:.4f}")
-
+                if best_intermediate_score > final_score:
+                    self._log.info(
+                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
+                        f"final sample (score: {final_score:.4f})"
+                    )
+                    return best_intermediate_sample
         else:
             final_feats = sample_feats
-            final_branch_score = float("-inf")
             self._log.info(f"  Using initial sample (no branches remained)")
-
-        # Compare best complete sample with final branch
-        self._log.info(f"  Best complete sample score: {best_complete_score:.4f}")
-        self._log.info(f"  Final branch score: {final_branch_score:.4f}")
-
-        if (
-            best_complete_sample is not None
-            and best_complete_score > final_branch_score
-        ):
-            self._log.info(
-                f"  Using best complete sample (score: {best_complete_score:.4f})"
-            )
-            return best_complete_sample
-
-        self._log.info(
-            f"  Using final branch trajectory (score: {final_branch_score:.4f})"
-        )
 
         # Complete the simulation if we haven't reached the end
         remaining_steps = [t for t in reverse_steps if t < branch_start_time]
@@ -1439,36 +1404,18 @@ class DivergenceFreeODEInference(InferenceMethod):
             final_result = self._simulate_to_completion(
                 final_feats, reverse_steps[0], dt, remaining_steps, context
             )
+
+            # Compare with best intermediate before returning
+            if best_intermediate_sample is not None:
+                final_score = score_fn(final_result, sample_length)
+                if best_intermediate_score > final_score:
+                    self._log.info(
+                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
+                        f"completed trajectory (score: {final_score:.4f})"
+                    )
+                    return best_intermediate_sample
+
             return final_result
-
-        # Flip trajectory so that it starts from t=0 (for visualization)
-        flip = lambda x: np.flip(np.stack(x), (0,))
-        all_bb_prots = flip(all_bb_prots)
-        all_rigids = flip(all_rigids)
-        all_trans_0_pred = flip(all_trans_0_pred)
-        all_bb_0_pred = flip(all_bb_0_pred)
-
-        self._log.info(
-            f"  Final trajectory shapes: prot_traj={all_bb_prots.shape}, rigid_traj={all_rigids.shape}"
-        )
-        self._log.info(f"  Expected trajectory length: {len(reverse_steps)} steps")
-        self._log.info(f"  Actual trajectory length: {len(all_bb_prots)} frames")
-        self._log.info(f"  Missing frames: {len(reverse_steps) - len(all_bb_prots)}")
-        self._log.info(f"  Branching steps: {len(branching_steps)}")
-
-        # Return final sample in proper format (matching inference_fn)
-        sample_out = {
-            "prot_traj": all_bb_prots,
-            "rigid_traj": all_rigids,
-            "trans_traj": all_trans_0_pred,
-            "psi_pred": (final_psi_pred[None] if final_psi_pred is not None else None),
-            "rigid_0_traj": all_bb_0_pred,
-        }
-
-        # Remove batch dimension like _base_sample does
-        return tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
-        )
 
 
 class SDESimpleInference(InferenceMethod):
@@ -1771,8 +1718,8 @@ class RandomSearchDivFreeInference(InferenceMethod):
         # Step 1: Random search to select best initial noises
         self._log.info(f"Phase 1: Random search over {num_branches} initial noises")
 
-        selected_noises = self._random_search_phase(
-            sample_length, num_branches, selector, context
+        selected_noises, best_intermediate_score, best_intermediate_sample = (
+            self._random_search_phase(num_branches, selector, sample_length, context)
         )
 
         # Step 2: Use selected noises for divergence-free ODE branching
@@ -1790,70 +1737,43 @@ class RandomSearchDivFreeInference(InferenceMethod):
             branch_start_time,
             branch_interval,
             context,
+            best_intermediate_score,
+            best_intermediate_sample,
         )
 
         return best_sample
 
-    def _random_search_phase(self, sample_length, num_random, selector, context):
-        """Phase 1: Random search to select best initial noises."""
+    def _random_search_phase(self, num_random, selector, sample_length, context):
+        """Phase 1: Random search to identify best initial noises."""
         score_fn = self.get_score_function(selector)
         candidates = []
 
+        # Track best intermediate sample across random search
+        best_intermediate_score = float("-inf")
+        best_intermediate_sample = None
+
         for i in range(num_random):
+            self._log.debug(f"  Random sample {i+1}/{num_random}")
+
             # Generate random initial features
-            res_mask = np.ones(sample_length)
-            fixed_mask = np.zeros_like(res_mask)
-            aatype = torch.zeros(sample_length, dtype=torch.int32)
-            chain_idx = torch.zeros_like(aatype)
+            init_feats = self.generate_initial_features(sample_length)
 
-            ref_sample = self.sampler.flow_matcher.sample_ref(
-                n_samples=sample_length,
-                as_tensor_7=True,
-            )
-            res_idx = torch.arange(1, sample_length + 1)
-
-            init_feats = {
-                "res_mask": res_mask,
-                "seq_idx": res_idx,
-                "fixed_mask": fixed_mask,
-                "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
-                "sc_ca_t": np.zeros((sample_length, 3)),
-                "aatype": aatype,
-                "chain_idx": chain_idx,
-                **ref_sample,
-            }
-
-            # Add batch dimension and move to GPU
-            init_feats = tree.map_structure(
-                lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
-            )
-            init_feats = tree.map_structure(
-                lambda x: x[None].to(self.sampler.device), init_feats
-            )
-
-            # Run standard sampling to completion
-            sample_out = self.sampler.exp.inference_fn(
-                init_feats,
-                num_t=self.sampler._fm_conf.num_t,
-                min_t=self.sampler._fm_conf.min_t,
-                aux_traj=True,
-                noise_scale=self.sampler._fm_conf.noise_scale,
-                context=context,
-            )
-
-            # Remove batch dimension
-            sample_result = tree.map_structure(lambda x: x[:, 0], sample_out)
-
-            # Score the sample
+            # Sample to completion
+            sample_result = self.sampler._base_sample(sample_length, context)
             score = score_fn(sample_result, sample_length)
 
-            candidates.append(
-                {"init_feats": init_feats, "sample": sample_result, "score": score}
-            )
+            candidates.append({"init_feats": init_feats, "score": score})
+            self._log.debug(f"    Score: {score:.4f}")
 
-            self._log.debug(f"  Random candidate {i+1}: score={score:.4f}")
+            # Track best intermediate sample
+            if score > best_intermediate_score:
+                best_intermediate_score = score
+                best_intermediate_sample = sample_result
+                self._log.info(
+                    f"    New best random search sample: score = {score:.4f}"
+                )
 
-        # Sort by score (higher is better for both tm_score and negative rmsd)
+        # Sort by score (descending)
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
         # Keep the best initial noises for branching
@@ -1873,7 +1793,45 @@ class RandomSearchDivFreeInference(InferenceMethod):
             f"Selected {len(selected)} best initial noises with scores: {scores_str}"
         )
 
-        return [c["init_feats"] for c in selected]
+        return (
+            [c["init_feats"] for c in selected],
+            best_intermediate_score,
+            best_intermediate_sample,
+        )
+
+    def generate_initial_features(self, sample_length):
+        """Generate initial features for a sample."""
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        return init_feats
 
     def _divfree_branching_phase(
         self,
@@ -1886,6 +1844,8 @@ class RandomSearchDivFreeInference(InferenceMethod):
         branch_start_time,
         branch_interval,
         context,
+        best_intermediate_score,
+        best_intermediate_sample,
     ):
         """Phase 2: Divergence-free ODE branching from selected noises."""
         score_fn = self.get_score_function(selector)
@@ -1905,21 +1865,41 @@ class RandomSearchDivFreeInference(InferenceMethod):
                 branch_start_time,
                 branch_interval,
                 context,
+                best_intermediate_score,
+                best_intermediate_sample,
             )
 
             all_results.extend(result)
 
-        # Select the best overall result
+        # Select the best overall result including the best intermediate from random search
         if all_results:
             best_result = max(all_results, key=lambda x: x["score"])
-            self._log.info(f"Best overall score: {best_result['score']:.4f}")
+            self._log.info(f"Best overall branching score: {best_result['score']:.4f}")
+
+            # Compare with best intermediate from random search
+            if (
+                best_intermediate_sample is not None
+                and best_intermediate_score > best_result["score"]
+            ):
+                self._log.info(
+                    f"Best intermediate from random search (score: {best_intermediate_score:.4f}) beats "
+                    f"best branching result (score: {best_result['score']:.4f})"
+                )
+                return best_intermediate_sample
+
             return best_result["sample"]
         else:
-            # Fallback to standard sampling
-            self._log.warning(
-                "No valid results from branching phase, falling back to standard"
-            )
-            return self.sampler._base_sample(sample_length, context)
+            # Fallback: use best intermediate from random search or standard sampling
+            if best_intermediate_sample is not None:
+                self._log.info(
+                    f"No valid branching results, using best random search sample"
+                )
+                return best_intermediate_sample
+            else:
+                self._log.warning(
+                    "No valid results from either phase, falling back to standard"
+                )
+                return self.sampler._base_sample(sample_length, context)
 
     def _divergence_free_path_exploration_inference(
         self,
@@ -1932,6 +1912,8 @@ class RandomSearchDivFreeInference(InferenceMethod):
         branch_start_time,
         branch_interval,
         context,
+        best_intermediate_score,
+        best_intermediate_sample,
     ):
         """Divergence-free path exploration inference (adapted from DivergenceFreeODEInference)."""
         sample_feats = tree.map_structure(
@@ -1944,10 +1926,6 @@ class RandomSearchDivFreeInference(InferenceMethod):
 
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
         dt = reverse_steps[0] - reverse_steps[1]
-
-        # Track best complete sample encountered during simulation
-        best_complete_sample = None
-        best_complete_score = float("-inf")
 
         # Track active trajectories
         active_trajectories = [
@@ -2091,10 +2069,10 @@ class RandomSearchDivFreeInference(InferenceMethod):
                         score = score_fn(simulated_sample, sample_length)
                         temp_scores.append((score, traj))
 
-                        # Update best complete sample if this is better
-                        if score > best_complete_score:
-                            best_complete_sample = simulated_sample
-                            best_complete_score = score
+                        # Update best intermediate sample if we found a better one
+                        if score > best_intermediate_score:
+                            best_intermediate_score = score
+                            best_intermediate_sample = simulated_sample
 
                     # Keep the best num_branches trajectories
                     temp_scores.sort(key=lambda x: x[0], reverse=True)
@@ -2109,11 +2087,6 @@ class RandomSearchDivFreeInference(InferenceMethod):
                 final_sample = self._extract_final_sample(traj["feats"])
                 score = score_fn(final_sample, sample_length)
 
-                # Update best complete sample if this is better
-                if score > best_complete_score:
-                    best_complete_sample = final_sample
-                    best_complete_score = score
-
                 results.append(
                     {
                         "sample": final_sample,
@@ -2121,16 +2094,6 @@ class RandomSearchDivFreeInference(InferenceMethod):
                         "branch_id": traj["branch_id"],
                     }
                 )
-
-        # Add the best complete sample to results if it was found during simulation
-        if best_complete_sample is not None:
-            results.append(
-                {
-                    "sample": best_complete_sample,
-                    "score": best_complete_score,
-                    "branch_id": "best_complete",
-                }
-            )
 
         return results
 
