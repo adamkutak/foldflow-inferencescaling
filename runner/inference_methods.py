@@ -231,14 +231,6 @@ class InferenceMethod(ABC):
         all_trans_0_pred = flip(all_trans_0_pred)
         all_bb_0_pred = flip(all_bb_0_pred)
 
-        self._log.info(
-            f"  Final trajectory shapes: prot_traj={all_bb_prots.shape}, rigid_traj={all_rigids.shape}"
-        )
-        self._log.info(f"  Expected trajectory length: {len(reverse_steps)} steps")
-        self._log.info(f"  Actual trajectory length: {len(all_bb_prots)} frames")
-        self._log.info(f"  Missing frames: {len(reverse_steps) - len(all_bb_prots)}")
-        self._log.info(f"  Branching steps: {len(branching_steps)}")
-
         # Return final sample in proper format (matching inference_fn)
         sample_out = {
             "prot_traj": all_bb_prots,
@@ -252,18 +244,6 @@ class InferenceMethod(ABC):
         result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
-
-        # Final comparison with best intermediate sample
-        if best_intermediate_sample is not None:
-            final_score = score_fn(result, sample_length)
-            self._log.info(f"  Final trajectory score: {final_score:.4f}")
-
-            if best_intermediate_score > final_score:
-                self._log.info(
-                    f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
-                    f"final trajectory (score: {final_score:.4f})"
-                )
-                return best_intermediate_sample
 
         return result
 
@@ -1281,19 +1261,8 @@ class DivergenceFreeODEInference(InferenceMethod):
                 f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
             )
 
-        # Complete all remaining trajectories and update best intermediate sample
-        for traj in active_trajectories:
-            if not traj["completed"]:
-                final_sample = self._extract_final_sample(traj["feats"])
-                score = score_fn(final_sample, sample_length)
-
-                # Update best intermediate sample if this is better
-                if score > best_intermediate_score:
-                    best_intermediate_score = score
-                    best_intermediate_sample = final_sample
-
-        # No need to return results - best_intermediate_score and best_intermediate_sample are updated in place
-        return best_intermediate_score, best_intermediate_sample
+        # Return best intermediate sample found during branching
+        return best_intermediate_sample
 
     def _extract_final_sample(self, feats):
         """Extract final sample from features."""
@@ -1959,19 +1928,8 @@ class RandomSearchDivFreeInference(InferenceMethod):
                         traj for _, traj in temp_scores[:num_branches]
                     ]
 
-        # Complete all remaining trajectories and update best intermediate sample
-        for traj in active_trajectories:
-            if not traj["completed"]:
-                final_sample = self._extract_final_sample(traj["feats"])
-                score = score_fn(final_sample, sample_length)
-
-                # Update best intermediate sample if this is better
-                if score > best_intermediate_score:
-                    best_intermediate_score = score
-                    best_intermediate_sample = final_sample
-
-        # No need to return results - best_intermediate_score and best_intermediate_sample are updated in place
-        return best_intermediate_score, best_intermediate_sample
+        # Return best intermediate sample found during branching
+        return best_intermediate_sample
 
     def _extract_final_sample(self, feats):
         """Extract final sample from features."""
