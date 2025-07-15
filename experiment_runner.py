@@ -523,7 +523,7 @@ def main():
     parser.add_argument(
         "--gpu_id",
         type=int,
-        default=0,
+        default=1,
         help="GPU ID to use for inference (overrides config file)",
     )
 
