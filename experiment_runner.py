@@ -123,6 +123,57 @@ class ExperimentRunner:
 
         return Sampler(conf)
 
+    def cleanup_sampler(self, sampler, method_name: str):
+        """Explicit cleanup of sampler to prevent memory leaks."""
+        try:
+            self.logger.debug(f"Cleaning up sampler for {method_name}")
+
+            # Move models to CPU and delete them explicitly
+            if hasattr(sampler, "model") and sampler.model is not None:
+                sampler.model = sampler.model.cpu()
+                del sampler.model
+
+            if (
+                hasattr(sampler, "_folding_model")
+                and sampler._folding_model is not None
+            ):
+                sampler._folding_model = sampler._folding_model.cpu()
+                del sampler._folding_model
+
+            # Clean up experiment object and its model
+            if hasattr(sampler, "exp") and sampler.exp is not None:
+                if hasattr(sampler.exp, "model") and sampler.exp.model is not None:
+                    sampler.exp.model = sampler.exp.model.cpu()
+                    del sampler.exp.model
+                if hasattr(sampler.exp, "_model") and sampler.exp._model is not None:
+                    sampler.exp._model = sampler.exp._model.cpu()
+                    del sampler.exp._model
+                del sampler.exp
+
+            # Clean up flow matcher
+            if hasattr(sampler, "flow_matcher"):
+                del sampler.flow_matcher
+
+            # Clean up inference method
+            if hasattr(sampler, "inference_method"):
+                del sampler.inference_method
+
+            # Delete the sampler object itself
+            del sampler
+
+            # Force garbage collection
+            import gc
+
+            gc.collect()
+
+            # Force GPU memory cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+        except Exception as cleanup_error:
+            self.logger.warning(f"Error during sampler cleanup: {cleanup_error}")
+
     def run_single_experiment(self, method_config: Dict[str, Any]) -> Dict[str, Any]:
         """Run a single experiment with given method configuration."""
         method_name = method_config["method"]
@@ -134,77 +185,87 @@ class ExperimentRunner:
         # Create sampler
         sampler = self.create_sampler(method_config)
 
-        # Track timing and results
-        start_time = time.time()
-        scores = []
+        try:
+            # Track timing and results
+            start_time = time.time()
+            scores = []
 
-        for sample_idx in range(self.args.num_samples):
-            self.logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
+            for sample_idx in range(self.args.num_samples):
+                self.logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
 
-            try:
-                # Generate sample
-                sample_start = time.time()
-                sample_result = sampler.inference_method.sample(self.args.sample_length)
-                sample_time = time.time() - sample_start
+                try:
+                    # Generate sample
+                    sample_start = time.time()
+                    sample_result = sampler.inference_method.sample(
+                        self.args.sample_length
+                    )
+                    sample_time = time.time() - sample_start
 
-                # Extract sample and score
-                if isinstance(sample_result, dict) and "sample" in sample_result:
-                    sample_output = sample_result["sample"]
-                    # Use the score from the method if available
-                    if "score" in sample_result:
-                        score = sample_result["score"]
+                    # Extract sample and score
+                    if isinstance(sample_result, dict) and "sample" in sample_result:
+                        sample_output = sample_result["sample"]
+                        # Use the score from the method if available
+                        if "score" in sample_result:
+                            score = sample_result["score"]
+                        else:
+                            # Evaluate manually
+                            score_fn = sampler.inference_method.get_score_function(
+                                self.args.scoring_function
+                            )
+                            score = score_fn(sample_output, self.args.sample_length)
                     else:
+                        sample_output = sample_result
                         # Evaluate manually
                         score_fn = sampler.inference_method.get_score_function(
                             self.args.scoring_function
                         )
                         score = score_fn(sample_output, self.args.sample_length)
-                else:
-                    sample_output = sample_result
-                    # Evaluate manually
-                    score_fn = sampler.inference_method.get_score_function(
-                        self.args.scoring_function
+
+                    scores.append(score)
+                    self.logger.info(
+                        f"    Score: {score:.4f}, Time: {sample_time:.2f}s"
                     )
-                    score = score_fn(sample_output, self.args.sample_length)
 
-                scores.append(score)
-                self.logger.info(f"    Score: {score:.4f}, Time: {sample_time:.2f}s")
+                except Exception as e:
+                    self.logger.error(f"Error in sample {sample_idx}: {e}")
+                    scores.append(float("nan"))
 
-            except Exception as e:
-                self.logger.error(f"Error in sample {sample_idx}: {e}")
-                scores.append(float("nan"))
+            total_time = time.time() - start_time
 
-        total_time = time.time() - start_time
+            # Calculate statistics
+            valid_scores = [s for s in scores if not np.isnan(s)]
+            if valid_scores:
+                mean_score = np.mean(valid_scores)
+                std_score = np.std(valid_scores)
+                max_score = np.max(valid_scores)
+                min_score = np.min(valid_scores)
+            else:
+                mean_score = std_score = max_score = min_score = float("nan")
 
-        # Calculate statistics
-        valid_scores = [s for s in scores if not np.isnan(s)]
-        if valid_scores:
-            mean_score = np.mean(valid_scores)
-            std_score = np.std(valid_scores)
-            max_score = np.max(valid_scores)
-            min_score = np.min(valid_scores)
-        else:
-            mean_score = std_score = max_score = min_score = float("nan")
+            result = {
+                "method": method_name,
+                "num_branches": branches,
+                "config": config,
+                "num_samples": len(valid_scores),
+                "mean_score": mean_score,
+                "std_score": std_score,
+                "max_score": max_score,
+                "min_score": min_score,
+                "total_time": total_time,
+                "time_per_sample": total_time / self.args.num_samples,
+                "scores": scores,
+                "scoring_function": self.args.scoring_function,
+            }
 
-        result = {
-            "method": method_name,
-            "num_branches": branches,
-            "config": config,
-            "num_samples": len(valid_scores),
-            "mean_score": mean_score,
-            "std_score": std_score,
-            "max_score": max_score,
-            "min_score": min_score,
-            "total_time": total_time,
-            "time_per_sample": total_time / self.args.num_samples,
-            "scores": scores,
-            "scoring_function": self.args.scoring_function,
-        }
+            self.logger.info(
+                f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
+            )
 
-        self.logger.info(
-            f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
-        )
-        return result
+            return result
+
+        finally:
+            # Cleanup sampler
+            self.cleanup_sampler(sampler, method_name)
 
     def run_all_experiments(self):
         """Run all experiments with different methods and branch counts."""
@@ -274,12 +335,23 @@ class ExperimentRunner:
             )
 
         # Run all experiments
-        for exp_config in experiments:
+        for i, exp_config in enumerate(experiments):
+            self.logger.info(
+                f"Starting experiment {i+1}/{len(experiments)}: {exp_config['method']}"
+            )
+
             try:
                 result = self.run_single_experiment(exp_config)
                 self.results.append(result)
             except Exception as e:
                 self.logger.error(f"Failed experiment {exp_config}: {e}")
+
+            # Force garbage collection between experiments
+            import gc
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Save results
         self.save_results()
