@@ -1648,21 +1648,12 @@ class RandomSearchDivFreeInference(InferenceMethod):
         # Sort by score (descending)
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
-        # Keep the best initial noises for branching
-        # Select a reasonable number based on how many random samples we evaluated
-        # For small num_random (2-4), keep 1-2; for larger (8+), keep 2-3
-        if num_random <= 2:
-            num_selected = 1
-        elif num_random <= 4:
-            num_selected = 2
-        else:
-            num_selected = min(3, num_random // 3)  # Keep about 1/3, max 3
-
-        selected = candidates[:num_selected]
+        # Keep only the best initial noise (num_keep = 1)
+        selected = candidates[:1]
 
         scores_str = [f"{c['score']:.4f}" for c in selected]
         self._log.info(
-            f"Selected {len(selected)} best initial noises with scores: {scores_str}"
+            f"Selected {len(selected)} best initial noise with scores: {scores_str}"
         )
 
         return (
@@ -1727,21 +1718,26 @@ class RandomSearchDivFreeInference(InferenceMethod):
 
             # Run divergence-free path exploration starting from this selected noise
             # This will update best_intermediate_score and best_intermediate_sample
-            best_intermediate_score, best_intermediate_sample = (
-                self._divergence_free_path_exploration_inference(
-                    init_noise,
-                    num_branches,
-                    num_keep,
-                    lambda_div,
-                    score_fn,
-                    sample_length,
-                    branch_start_time,
-                    branch_interval,
-                    context,
-                    best_intermediate_score,
-                    best_intermediate_sample,
-                )
+            best_sample = self._divergence_free_path_exploration_inference_randomsearch(
+                init_noise,
+                num_branches,
+                num_keep,
+                lambda_div,
+                score_fn,
+                sample_length,
+                branch_start_time,
+                branch_interval,
+                context,
+                best_intermediate_score,
+                best_intermediate_sample,
             )
+
+            # Update best intermediate sample if we found a better one
+            if best_sample is not None:
+                score = score_fn(best_sample, sample_length)
+                if score > best_intermediate_score:
+                    best_intermediate_score = score
+                    best_intermediate_sample = best_sample
 
         # Return the best intermediate sample from all phases
         self._log.info(
@@ -1749,7 +1745,7 @@ class RandomSearchDivFreeInference(InferenceMethod):
         )
         return best_intermediate_sample
 
-    def _divergence_free_path_exploration_inference(
+    def _divergence_free_path_exploration_inference_randomsearch(
         self,
         data_init,
         num_branches,

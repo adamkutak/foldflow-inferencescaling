@@ -274,6 +274,22 @@ class ExperimentRunner:
         # 1. Baseline: Standard sampling
         # experiments.append({"method": "standard", "config": {}})
 
+        # Random Search + Divergence-free ODE with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "random_search_divfree",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": 1,  # Always keep only 1 as specified
+                        "lambda_div": self.args.lambda_div,
+                        "selector": self.args.scoring_function,
+                        "branch_start_time": 0.0,
+                        "branch_interval": self.args.branch_interval,
+                    },
+                }
+            )
+
         # SDE path exploration with different branch counts
         for n_branches in self.args.branch_counts:
             experiments.append(
@@ -314,22 +330,6 @@ class ExperimentRunner:
                     "config": {
                         "n_samples": n_branches,
                         "selector": self.args.scoring_function,
-                    },
-                }
-            )
-
-        # Random Search + Divergence-free ODE with different branch counts
-        for n_branches in self.args.branch_counts:
-            experiments.append(
-                {
-                    "method": "random_search_divfree",
-                    "config": {
-                        "num_branches": n_branches,
-                        "num_keep": 1,  # Always keep only 1 as specified
-                        "lambda_div": self.args.lambda_div,
-                        "selector": self.args.scoring_function,
-                        "branch_start_time": 0.0,
-                        "branch_interval": self.args.branch_interval,
                     },
                 }
             )
