@@ -1760,6 +1760,13 @@ class RandomSearchDivFreeInference(InferenceMethod):
         best_intermediate_sample,
     ):
         """Divergence-free path exploration inference (adapted from DivergenceFreeODEInference)."""
+        self._log.info(f"DIVERGENCE-FREE ODE PATH EXPLORATION START")
+        self._log.info(f"  num_branches={num_branches}, num_keep={num_keep}")
+        self._log.info(
+            f"  lambda_div={lambda_div}, branch_start_time={branch_start_time}"
+        )
+        self._log.info(f"  branch_interval={branch_interval}")
+
         sample_feats = tree.map_structure(
             lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
         )
@@ -1770,6 +1777,11 @@ class RandomSearchDivFreeInference(InferenceMethod):
 
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
         dt = reverse_steps[0] - reverse_steps[1]
+
+        self._log.info(f"  num_t={num_t}, min_t={min_t:.4f}, dt={dt:.4f}")
+        self._log.info(
+            f"  reverse_steps: {reverse_steps[0]:.4f} -> {reverse_steps[-1]:.4f}"
+        )
 
         # Track active trajectories
         active_trajectories = [
@@ -1786,6 +1798,7 @@ class RandomSearchDivFreeInference(InferenceMethod):
 
         completed_trajectories = []
         branch_counter = 1
+        branching_steps = []
 
         with torch.no_grad():
             for step_idx, t in enumerate(reverse_steps):
@@ -1793,15 +1806,34 @@ class RandomSearchDivFreeInference(InferenceMethod):
                 remaining_steps = len(reverse_steps) - step_idx - 1
 
                 # Determine if we should branch at this step
+                branch_interval_steps = (
+                    max(1, int(branch_interval / dt)) if branch_interval > 0.0 else 1
+                )
                 should_branch = (
                     current_time >= branch_start_time
                     and len(active_trajectories) < num_branches
                     and remaining_steps > 0
                     and (
-                        branch_interval == 0.0
-                        or step_idx % max(1, int(branch_interval / dt)) == 0
+                        branch_interval == 0.0 or step_idx % branch_interval_steps == 0
                     )
                 )
+
+                if step_idx % 10 == 0:  # Log every 10th step to avoid spam
+                    self._log.debug(
+                        f"Step {step_idx}: t={t:.4f}, should_branch={should_branch}, "
+                        f"active_trajectories={len(active_trajectories)}, "
+                        f"branch_interval_steps={branch_interval_steps}, "
+                        f"step_idx % branch_interval_steps={step_idx % branch_interval_steps}"
+                    )
+
+                if should_branch:
+                    branching_steps.append((step_idx, t))
+                    self._log.info(
+                        f"BRANCHING at timestep t={t:.4f} (step {step_idx}/{len(reverse_steps)})"
+                    )
+                    self._log.info(
+                        f"  Current trajectories: {len(active_trajectories)}"
+                    )
 
                 new_trajectories = []
 
@@ -1829,6 +1861,11 @@ class RandomSearchDivFreeInference(InferenceMethod):
                     if should_branch and len(new_trajectories) < num_branches - len(
                         active_trajectories
                     ):
+                        self._log.debug(f"    Creating branch {branch_counter}")
+                        self._log.debug(
+                            f"    len(new_trajectories)={len(new_trajectories)}, num_branches={num_branches}, len(active_trajectories)={len(active_trajectories)}"
+                        )
+
                         # Create branched trajectory with divergence-free noise
                         branch_feats = tree.map_structure(
                             lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
@@ -1878,6 +1915,9 @@ class RandomSearchDivFreeInference(InferenceMethod):
                         }
                         new_trajectories.append(new_traj)
                         branch_counter += 1
+                        self._log.debug(
+                            f"    Created branch {branch_counter-1}, total new trajectories: {len(new_trajectories)}"
+                        )
 
                     # Continue main trajectory without noise
                     rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
@@ -1896,9 +1936,17 @@ class RandomSearchDivFreeInference(InferenceMethod):
 
                 # Add new trajectories
                 active_trajectories.extend(new_trajectories)
+                if new_trajectories:
+                    self._log.debug(
+                        f"    Added {len(new_trajectories)} new trajectories, total active: {len(active_trajectories)}"
+                    )
 
                 # Check if we need to prune trajectories
                 if len(active_trajectories) > num_branches:
+                    self._log.info(
+                        f"  Pruning trajectories: {len(active_trajectories)} -> {num_branches}"
+                    )
+
                     # Simulate to completion and score to decide which to keep
                     temp_scores = []
                     for traj in active_trajectories:
@@ -1917,12 +1965,36 @@ class RandomSearchDivFreeInference(InferenceMethod):
                         if score > best_intermediate_score:
                             best_intermediate_score = score
                             best_intermediate_sample = simulated_sample
+                            self._log.info(
+                                f"    New best intermediate sample: score = {score:.4f}"
+                            )
 
                     # Keep the best num_branches trajectories
                     temp_scores.sort(key=lambda x: x[0], reverse=True)
                     active_trajectories = [
                         traj for _, traj in temp_scores[:num_branches]
                     ]
+
+        # If we haven't found any intermediate samples, simulate the final trajectory
+        if best_intermediate_sample is None:
+            self._log.info(
+                "  No intermediate samples found, simulating final trajectory"
+            )
+            final_traj = active_trajectories[0] if active_trajectories else None
+            if final_traj is not None:
+                best_intermediate_sample = self._extract_final_sample(
+                    final_traj["feats"]
+                )
+                score = score_fn(best_intermediate_sample, sample_length)
+                if score > best_intermediate_score:
+                    best_intermediate_score = score
+
+        self._log.info(f"DIVERGENCE-FREE ODE PATH EXPLORATION COMPLETE")
+        self._log.info(f"  Total branching steps: {len(branching_steps)}")
+        self._log.info(
+            f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
+        )
+        self._log.info(f"  Final best score: {best_intermediate_score:.4f}")
 
         # Return best intermediate sample found during branching
         return best_intermediate_sample
