@@ -111,6 +111,16 @@ class MultiGPUExperimentRunner:
         self.num_gpus = len(self.available_gpus)
         self.logger.info(f"Using GPUs: {self.available_gpus}")
 
+        # Debug: Check available GPUs
+        if torch.cuda.is_available():
+            total_gpus = torch.cuda.device_count()
+            self.logger.info(f"Total CUDA devices available: {total_gpus}")
+            for i in range(total_gpus):
+                gpu_name = torch.cuda.get_device_name(i)
+                self.logger.info(f"  GPU {i}: {gpu_name}")
+        else:
+            self.logger.warning("CUDA not available!")
+
         # Create a queue for GPU assignment
         self.gpu_queue = Queue()
         for gpu_id in self.available_gpus:
@@ -193,15 +203,34 @@ class MultiGPUExperimentRunner:
         """Worker function to run a single experiment on a specific GPU."""
         method_config, gpu_id, result_queue = experiment_data
 
-        # Set the GPU for this process
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # Set the GPU for this process using torch.cuda.set_device
+        # This allows PyTorch to see all GPUs but use the specific one
+        if torch.cuda.is_available():
+            torch.cuda.set_device(gpu_id)
+            # Verify we're on the correct device
+            current_device = torch.cuda.current_device()
+            if current_device != gpu_id:
+                raise RuntimeError(
+                    f"Failed to set GPU to {gpu_id}, current device is {current_device}"
+                )
+
+            # Debug: Log device information
+            worker_logger = logging.getLogger(f"{__name__}.worker.{gpu_id}")
+            worker_logger.info(f"Worker process assigned to GPU {gpu_id}")
+            worker_logger.info(f"Current device: {torch.cuda.current_device()}")
+            worker_logger.info(f"Device name: {torch.cuda.get_device_name(gpu_id)}")
+            worker_logger.info(f"Total devices visible: {torch.cuda.device_count()}")
+        else:
+            worker_logger = logging.getLogger(f"{__name__}.worker.{gpu_id}")
+            worker_logger.warning("CUDA not available in worker process!")
 
         method_name = method_config["method"]
         config = method_config.get("config", {})
         branches = config.get("num_branches", 1)
 
-        # Setup logging for this worker
-        worker_logger = logging.getLogger(f"{__name__}.worker.{gpu_id}")
+        # Setup logging for this worker (if not already set up above)
+        if not "worker_logger" in locals():
+            worker_logger = logging.getLogger(f"{__name__}.worker.{gpu_id}")
         worker_logger.info(
             f"Running experiment: {method_name} with {branches} branches on GPU {gpu_id}"
         )
@@ -364,6 +393,7 @@ class MultiGPUExperimentRunner:
 
         # Run experiments concurrently
         processes = []
+        process_gpu_map = {}  # Track which GPU each process is using
         experiment_idx = 0
 
         while experiment_idx < len(experiments):
@@ -375,6 +405,14 @@ class MultiGPUExperimentRunner:
                 for p in processes[:]:
                     if not p.is_alive():
                         p.join()
+                        # Return the GPU to the queue
+                        if p in process_gpu_map:
+                            returned_gpu = process_gpu_map[p]
+                            self.gpu_queue.put(returned_gpu)
+                            del process_gpu_map[p]
+                            self.logger.info(
+                                f"Process finished, returned GPU {returned_gpu} to queue"
+                            )
                         processes.remove(p)
                 continue
 
@@ -387,6 +425,7 @@ class MultiGPUExperimentRunner:
             )
             p.start()
             processes.append(p)
+            process_gpu_map[p] = gpu_id  # Track which GPU this process is using
 
             self.logger.info(
                 f"Started experiment {experiment_idx+1}/{len(experiments)}: {exp_config['method']} on GPU {gpu_id}"
@@ -396,6 +435,14 @@ class MultiGPUExperimentRunner:
         # Wait for all processes to complete
         for p in processes:
             p.join()
+            # Return the GPU to the queue
+            if p in process_gpu_map:
+                returned_gpu = process_gpu_map[p]
+                self.gpu_queue.put(returned_gpu)
+                del process_gpu_map[p]
+                self.logger.info(
+                    f"Process finished, returned GPU {returned_gpu} to queue"
+                )
 
         # Collect all results
         while not result_queue.empty():
