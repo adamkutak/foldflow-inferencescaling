@@ -30,6 +30,16 @@ import queue
 # Add the project root to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Set multiprocessing start method to 'spawn' for CUDA compatibility
+try:
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    # Start method already set, check if it's 'spawn'
+    if mp.get_start_method() != "spawn":
+        raise RuntimeError(
+            "Multiprocessing start method must be 'spawn' for CUDA compatibility"
+        )
+
 from runner.inference_methods import get_inference_method
 from runner.inference import Sampler
 from omegaconf import DictConfig, OmegaConf
