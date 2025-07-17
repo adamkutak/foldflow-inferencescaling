@@ -639,7 +639,7 @@ def main():
         "--gpu_ids",
         type=int,
         nargs="+",
-        default=[2, 3, 3, 4],
+        default=[1, 2, 3, 4],
         help="List of GPU IDs to use for concurrent experiments (default: [0, 1, 2])",
     )
 
