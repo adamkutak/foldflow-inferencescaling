@@ -236,21 +236,13 @@ class InferenceMethod(ABC):
             "prot_traj": all_bb_prots,
             "rigid_traj": all_rigids,
             "trans_traj": all_trans_0_pred,
-            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "psi_pred": (final_psi_pred[None] if final_psi_pred is not None else None),
             "rigid_0_traj": all_bb_0_pred,
         }
-
-        self._log.debug(
-            f"        _simulate_to_completion: Trajectory shapes - prot_traj: {all_bb_prots.shape}, rigid_traj: {all_rigids.shape}"
-        )
 
         # Remove batch dimension like _base_sample does
         result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
-        )
-
-        self._log.debug(
-            f"        _simulate_to_completion: Final result shapes - prot_traj: {result['prot_traj'].shape}, rigid_traj: {result['rigid_traj'].shape}"
         )
 
         return result
@@ -753,113 +745,15 @@ class SDEPathExplorationInference(InferenceMethod):
 
             self._log.info(f"SDE PATH EXPLORATION COMPLETE")
             self._log.info(f"  Total branching steps: {len(branching_steps)}")
-            if branching_steps:
-                self._log.info(
-                    f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
-                )
-            else:
-                self._log.info(
-                    f"  No branching occurred (branch_start_time={branch_start_time}, branch_interval={branch_interval})"
-                )
-
-            # Return best final sample
-            if len(current_samples) == 1:
-                final_sample = current_samples[0]
-                self._log.info(f"  Using single remaining sample")
-
-                # For single sample, evaluate it and compare with best intermediate
-                if best_intermediate_sample is not None:
-                    sample_out = {
-                        "prot_traj": final_sample["rigids_t"],
-                        "rigid_0_traj": final_sample["rigids_t"],
-                    }
-                    final_score = score_fn(sample_out, sample_length)
-                    self._log.info(f"  Final sample score: {final_score:.4f}")
-
-                    if best_intermediate_score > final_score:
-                        self._log.info(
-                            f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
-                            f"final sample (score: {final_score:.4f})"
-                        )
-                        return best_intermediate_sample
-            else:
-                # Evaluate all final samples and pick best
-                self._log.info(f"  Evaluating {len(current_samples)} final samples...")
-                final_scores = []
-                for i, feats in enumerate(current_samples):
-                    # Create a simple trajectory for evaluation
-                    sample_out = {
-                        "prot_traj": feats["rigids_t"],
-                        "rigid_0_traj": feats["rigids_t"],
-                    }
-                    score = score_fn(sample_out, sample_length)
-                    final_scores.append(score)
-                    self._log.info(f"    Final sample {i}: score = {score:.4f}")
-
-                best_idx = np.argmax(final_scores)
-                final_sample = current_samples[best_idx]
-                best_final_score = final_scores[best_idx]
-                self._log.info(
-                    f"  Selected final sample {best_idx} with score {best_final_score:.4f}"
-                )
-
-                # Compare with best intermediate sample
-                if (
-                    best_intermediate_sample is not None
-                    and best_intermediate_score > best_final_score
-                ):
-                    self._log.info(
-                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
-                        f"best final sample (score: {best_final_score:.4f})"
-                    )
-                    return best_intermediate_sample
-
-            # Flip trajectory so that it starts from t=0 (for visualization)
-            flip = lambda x: np.flip(np.stack(x), (0,))
-            all_bb_prots = flip(all_bb_prots)
-            all_rigids = flip(all_rigids)
-            all_trans_0_pred = flip(all_trans_0_pred)
-            all_bb_0_pred = flip(all_bb_0_pred)
-
             self._log.info(
-                f"  Final trajectory shapes: prot_traj={all_bb_prots.shape}, rigid_traj={all_rigids.shape}"
-            )
-            self._log.info(f"  Expected trajectory length: {len(reverse_steps)} steps")
-            self._log.info(f"  Actual trajectory length: {len(all_bb_prots)} frames")
-            self._log.info(
-                f"  Missing frames: {len(reverse_steps) - len(all_bb_prots)}"
-            )
-            self._log.info(f"  Branching steps: {len(branching_steps)}")
-
-            # Return final sample in proper format (matching inference_fn)
-            sample_out = {
-                "prot_traj": all_bb_prots,
-                "rigid_traj": all_rigids,
-                "trans_traj": all_trans_0_pred,
-                "psi_pred": (
-                    final_psi_pred[None] if final_psi_pred is not None else None
-                ),
-                "rigid_0_traj": all_bb_0_pred,
-            }
-
-            # Remove batch dimension like _base_sample does
-            result = tree.map_structure(
-                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
+                f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
             )
 
-            # Final comparison with best intermediate sample
-            if best_intermediate_sample is not None:
-                final_score = score_fn(result, sample_length)
-                self._log.info(f"  Final trajectory score: {final_score:.4f}")
-
-                if best_intermediate_score > final_score:
-                    self._log.info(
-                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
-                        f"final trajectory (score: {final_score:.4f})"
-                    )
-                    return best_intermediate_sample
-
-            return result
+        # Return best intermediate sample (which is the final result after simulate_to_completion)
+        self._log.info(
+            f"  Returning best intermediate sample with score: {best_intermediate_score:.4f}"
+        )
+        return best_intermediate_sample
 
 
 class DivergenceFreeODEInference(InferenceMethod):
@@ -1363,59 +1257,37 @@ class DivergenceFreeODEInference(InferenceMethod):
 
             self._log.info(f"DIVERGENCE-FREE ODE PATH EXPLORATION COMPLETE")
             self._log.info(f"  Total branching steps: {len(branching_steps)}")
-            if branching_steps:
-                self._log.info(
-                    f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
-                )
-            else:
-                self._log.info(
-                    f"  No branching occurred (branch_start_time={branch_start_time}, branch_interval={branch_interval})"
-                )
-
-        # Return the final sample from the best branch
-        if current_samples:
-            final_feats = current_samples[0]
-            self._log.info(f"  Using single remaining sample")
-
-            # For single sample, evaluate it and compare with best intermediate
-            if best_intermediate_sample is not None:
-                sample_out = {
-                    "prot_traj": final_feats["rigids_t"],
-                    "rigid_0_traj": final_feats["rigids_t"],
-                }
-                final_score = score_fn(sample_out, sample_length)
-                self._log.info(f"  Final sample score: {final_score:.4f}")
-
-                if best_intermediate_score > final_score:
-                    self._log.info(
-                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
-                        f"final sample (score: {final_score:.4f})"
-                    )
-                    return best_intermediate_sample
-        else:
-            final_feats = sample_feats
-            self._log.info(f"  Using initial sample (no branches remained)")
-
-        # Complete the simulation if we haven't reached the end
-        remaining_steps = [t for t in reverse_steps if t < branch_start_time]
-        if remaining_steps and len(all_bb_prots) == 0:
-            # We branched early, need to complete the trajectory
-            self._log.info(f"  Completing trajectory from branch start")
-            final_result = self._simulate_to_completion(
-                final_feats, reverse_steps[0], dt, remaining_steps, context
+            self._log.info(
+                f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
             )
 
-            # Compare with best intermediate before returning
-            if best_intermediate_sample is not None:
-                final_score = score_fn(final_result, sample_length)
-                if best_intermediate_score > final_score:
-                    self._log.info(
-                        f"  Best intermediate sample (score: {best_intermediate_score:.4f}) beats "
-                        f"completed trajectory (score: {final_score:.4f})"
-                    )
-                    return best_intermediate_sample
+        # Return best intermediate sample found during branching
+        return best_intermediate_sample
 
-            return final_result
+    def _extract_final_sample(self, feats):
+        """Extract final sample from features."""
+        with torch.no_grad():
+            # Get final structure prediction
+            model_out = self.sampler.model(feats)
+            rigid_pred = model_out["rigids"]
+            psi_pred = model_out["psi"]
+
+            # Compute backbone structure
+            atom37_0 = all_atom.compute_backbone(
+                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+            )[0]
+
+            # Create trajectory-like output (simplified)
+            prot_traj = du.move_to_np(atom37_0)[None]  # Add time dimension
+            rigid_traj = du.move_to_np(rigid_pred)[None]
+
+            return {
+                "prot_traj": prot_traj,
+                "rigid_traj": rigid_traj,
+                "trans_traj": du.move_to_np(rigid_pred[..., 4:])[None],
+                "psi_pred": psi_pred[None] if psi_pred is not None else None,
+                "rigid_0_traj": prot_traj,
+            }
 
 
 class SDESimpleInference(InferenceMethod):
@@ -1692,7 +1564,7 @@ class DivergenceFreeSimpleInference(InferenceMethod):
         }
 
 
-class RandomSearchDivFreeInference(InferenceMethod):
+class RandomSearchDivFreeInference(DivergenceFreeODEInference):
     """Combined random search and divergence-free ODE branching method.
 
     First performs random search over N initial noises to select the best ones,
@@ -1776,21 +1648,12 @@ class RandomSearchDivFreeInference(InferenceMethod):
         # Sort by score (descending)
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
-        # Keep the best initial noises for branching
-        # Select a reasonable number based on how many random samples we evaluated
-        # For small num_random (2-4), keep 1-2; for larger (8+), keep 2-3
-        if num_random <= 2:
-            num_selected = 1
-        elif num_random <= 4:
-            num_selected = 2
-        else:
-            num_selected = min(3, num_random // 3)  # Keep about 1/3, max 3
-
-        selected = candidates[:num_selected]
+        # Keep only the best initial noise (num_keep = 1)
+        selected = candidates[:1]
 
         scores_str = [f"{c['score']:.4f}" for c in selected]
         self._log.info(
-            f"Selected {len(selected)} best initial noises with scores: {scores_str}"
+            f"Selected {len(selected)} best initial noise with scores: {scores_str}"
         )
 
         return (
@@ -1849,13 +1712,13 @@ class RandomSearchDivFreeInference(InferenceMethod):
     ):
         """Phase 2: Divergence-free ODE branching from selected noises."""
         score_fn = self.get_score_function(selector)
-        all_results = []
 
         for i, init_noise in enumerate(selected_noises):
             self._log.debug(f"  Running div-free branching from selected noise {i+1}")
 
             # Run divergence-free path exploration starting from this selected noise
-            result = self._divergence_free_path_exploration_inference(
+            # Use the parent class's method with the selected initial noise
+            best_sample = self._divergence_free_path_exploration_inference(
                 init_noise,
                 num_branches,
                 num_keep,
@@ -1865,262 +1728,20 @@ class RandomSearchDivFreeInference(InferenceMethod):
                 branch_start_time,
                 branch_interval,
                 context,
-                best_intermediate_score,
-                best_intermediate_sample,
             )
 
-            all_results.extend(result)
+            # Update best intermediate sample if we found a better one
+            if best_sample is not None:
+                score = score_fn(best_sample, sample_length)
+                if score > best_intermediate_score:
+                    best_intermediate_score = score
+                    best_intermediate_sample = best_sample
 
-        # Select the best overall result including the best intermediate from random search
-        if all_results:
-            best_result = max(all_results, key=lambda x: x["score"])
-            self._log.info(f"Best overall branching score: {best_result['score']:.4f}")
-
-            # Compare with best intermediate from random search
-            if (
-                best_intermediate_sample is not None
-                and best_intermediate_score > best_result["score"]
-            ):
-                self._log.info(
-                    f"Best intermediate from random search (score: {best_intermediate_score:.4f}) beats "
-                    f"best branching result (score: {best_result['score']:.4f})"
-                )
-                return best_intermediate_sample
-
-            return best_result["sample"]
-        else:
-            # Fallback: use best intermediate from random search or standard sampling
-            if best_intermediate_sample is not None:
-                self._log.info(
-                    f"No valid branching results, using best random search sample"
-                )
-                return best_intermediate_sample
-            else:
-                self._log.warning(
-                    "No valid results from either phase, falling back to standard"
-                )
-                return self.sampler._base_sample(sample_length, context)
-
-    def _divergence_free_path_exploration_inference(
-        self,
-        data_init,
-        num_branches,
-        num_keep,
-        lambda_div,
-        score_fn,
-        sample_length,
-        branch_start_time,
-        branch_interval,
-        context,
-        best_intermediate_score,
-        best_intermediate_sample,
-    ):
-        """Divergence-free path exploration inference (adapted from DivergenceFreeODEInference)."""
-        sample_feats = tree.map_structure(
-            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
+        # Return the best intermediate sample from all phases
+        self._log.info(
+            f"Returning best sample with score: {best_intermediate_score:.4f}"
         )
-        device = sample_feats["rigids_t"].device
-
-        num_t = self.sampler._fm_conf.num_t
-        min_t = self.sampler._fm_conf.min_t
-
-        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
-        dt = reverse_steps[0] - reverse_steps[1]
-
-        # Track active trajectories
-        active_trajectories = [
-            {
-                "feats": copy.deepcopy(sample_feats),
-                "trajectory": [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))],
-                "branch_id": 0,
-                "parent_id": None,
-                "completed": False,
-                "final_sample": None,
-                "score": None,
-            }
-        ]
-
-        completed_trajectories = []
-        branch_counter = 1
-
-        with torch.no_grad():
-            for step_idx, t in enumerate(reverse_steps):
-                current_time = t
-                remaining_steps = len(reverse_steps) - step_idx - 1
-
-                # Determine if we should branch at this step
-                should_branch = (
-                    current_time >= branch_start_time
-                    and len(active_trajectories) < num_branches
-                    and remaining_steps > 0
-                    and (
-                        branch_interval == 0.0
-                        or step_idx % max(1, int(branch_interval / dt)) == 0
-                    )
-                )
-
-                new_trajectories = []
-
-                for traj in active_trajectories:
-                    if traj["completed"]:
-                        continue
-
-                    # Set time features
-                    traj["feats"] = self.sampler.exp._set_t_feats(
-                        traj["feats"], t, torch.ones((1,)).to(device)
-                    )
-                    model_out = self.sampler.model(traj["feats"])
-
-                    rot_vectorfield = model_out["rot_vectorfield"]
-                    trans_vectorfield = model_out["trans_vectorfield"]
-                    rigid_pred = model_out["rigids"]
-                    psi_pred = model_out["psi"]
-
-                    fixed_mask = traj["feats"]["fixed_mask"] * traj["feats"]["res_mask"]
-                    flow_mask = (1 - traj["feats"]["fixed_mask"]) * traj["feats"][
-                        "res_mask"
-                    ]
-
-                    # Create divergence-free noise for branching
-                    if should_branch and len(new_trajectories) < num_branches - len(
-                        active_trajectories
-                    ):
-                        # Create branched trajectory with divergence-free noise
-                        branch_feats = tree.map_structure(
-                            lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
-                            traj["feats"],
-                        )
-
-                        # Apply divergence-free noise
-                        noise_rot = torch.randn_like(rot_vectorfield) * lambda_div
-                        noise_trans = torch.randn_like(trans_vectorfield) * lambda_div
-
-                        # Make noise divergence-free (simplified approach)
-                        noise_rot = noise_rot - torch.mean(
-                            noise_rot, dim=-2, keepdim=True
-                        )
-                        noise_trans = noise_trans - torch.mean(
-                            noise_trans, dim=-2, keepdim=True
-                        )
-
-                        # Apply noise to vector fields
-                        noisy_rot_vectorfield = rot_vectorfield + noise_rot
-                        noisy_trans_vectorfield = trans_vectorfield + noise_trans
-
-                        # Apply flow step with noisy vector fields
-                        rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
-                            rigid_t=ru.Rigid.from_tensor_7(branch_feats["rigids_t"]),
-                            rot_vectorfield=du.move_to_np(noisy_rot_vectorfield),
-                            trans_vectorfield=du.move_to_np(noisy_trans_vectorfield),
-                            flow_mask=du.move_to_np(flow_mask),
-                            t=t,
-                            dt=dt,
-                            center=True,
-                            noise_scale=1.0,
-                        )
-
-                        branch_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-
-                        # Create new trajectory
-                        new_traj = {
-                            "feats": branch_feats,
-                            "trajectory": traj["trajectory"]
-                            + [du.move_to_np(rigids_t.to_tensor_7())],
-                            "branch_id": branch_counter,
-                            "parent_id": traj["branch_id"],
-                            "completed": False,
-                            "final_sample": None,
-                            "score": None,
-                        }
-                        new_trajectories.append(new_traj)
-                        branch_counter += 1
-
-                    # Continue main trajectory without noise
-                    rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
-                        rigid_t=ru.Rigid.from_tensor_7(traj["feats"]["rigids_t"]),
-                        rot_vectorfield=du.move_to_np(rot_vectorfield),
-                        trans_vectorfield=du.move_to_np(trans_vectorfield),
-                        flow_mask=du.move_to_np(flow_mask),
-                        t=t,
-                        dt=dt,
-                        center=True,
-                        noise_scale=1.0,
-                    )
-
-                    traj["feats"]["rigids_t"] = rigids_t.to_tensor_7().to(device)
-                    traj["trajectory"].append(du.move_to_np(rigids_t.to_tensor_7()))
-
-                # Add new trajectories
-                active_trajectories.extend(new_trajectories)
-
-                # Check if we need to prune trajectories
-                if len(active_trajectories) > num_branches:
-                    # Simulate to completion and score to decide which to keep
-                    temp_scores = []
-                    for traj in active_trajectories:
-                        if remaining_steps > 0:
-                            simulated_sample = self._simulate_to_completion(
-                                traj["feats"], t, dt, remaining_steps, context
-                            )
-                        else:
-                            # Already at the end
-                            simulated_sample = self._extract_final_sample(traj["feats"])
-
-                        score = score_fn(simulated_sample, sample_length)
-                        temp_scores.append((score, traj))
-
-                        # Update best intermediate sample if we found a better one
-                        if score > best_intermediate_score:
-                            best_intermediate_score = score
-                            best_intermediate_sample = simulated_sample
-
-                    # Keep the best num_branches trajectories
-                    temp_scores.sort(key=lambda x: x[0], reverse=True)
-                    active_trajectories = [
-                        traj for _, traj in temp_scores[:num_branches]
-                    ]
-
-        # Complete all remaining trajectories
-        results = []
-        for traj in active_trajectories:
-            if not traj["completed"]:
-                final_sample = self._extract_final_sample(traj["feats"])
-                score = score_fn(final_sample, sample_length)
-
-                results.append(
-                    {
-                        "sample": final_sample,
-                        "score": score,
-                        "branch_id": traj["branch_id"],
-                    }
-                )
-
-        return results
-
-    def _extract_final_sample(self, feats):
-        """Extract final sample from features."""
-        with torch.no_grad():
-            # Get final structure prediction
-            model_out = self.sampler.model(feats)
-            rigid_pred = model_out["rigids"]
-            psi_pred = model_out["psi"]
-
-            # Compute backbone structure
-            atom37_0 = all_atom.compute_backbone(
-                ru.Rigid.from_tensor_7(rigid_pred), psi_pred
-            )[0]
-
-            # Create trajectory-like output (simplified)
-            prot_traj = du.move_to_np(atom37_0)[None]  # Add time dimension
-            rigid_traj = du.move_to_np(rigid_pred)[None]
-
-            return {
-                "prot_traj": prot_traj,
-                "rigid_traj": rigid_traj,
-                "trans_traj": du.move_to_np(rigid_pred[..., 4:])[None],
-                "psi_pred": psi_pred[None] if psi_pred is not None else None,
-                "rigid_0_traj": prot_traj,
-            }
+        return best_intermediate_sample
 
 
 def get_inference_method(
