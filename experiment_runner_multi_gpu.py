@@ -213,6 +213,11 @@ class MultiGPUExperimentRunner:
         """Worker function to run a single experiment on a specific GPU."""
         method_config, gpu_id, result_queue = experiment_data
 
+        # Set environment variable that affects geomstats backend
+        # This line magically changes some tensors to double precision
+        # so we need to reset the default dtype later (like in train.py)
+        os.environ["GEOMSTATS_BACKEND"] = "pytorch"
+
         # Set the GPU for this process using torch.cuda.set_device
         # This allows PyTorch to see all GPUs but use the specific one
         if torch.cuda.is_available():
