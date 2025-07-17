@@ -230,6 +230,11 @@ class MultiGPUExperimentRunner:
         from runner.inference_methods import get_inference_method
         from runner.inference import Sampler
 
+        # Apply the same PyTorch settings as in train.py
+        torch.set_float32_matmul_precision("medium")
+        torch.set_default_dtype(torch.float32)
+        torch.backends.cuda.matmul.allow_tf32 = True
+
         # Set the GPU for this process using torch.cuda.set_device
         # This allows PyTorch to see all GPUs but use the specific one
         if torch.cuda.is_available():
