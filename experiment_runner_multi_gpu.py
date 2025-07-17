@@ -136,7 +136,7 @@ class MultiGPUExperimentRunner:
         for gpu_id in self.available_gpus:
             self.gpu_queue.put(gpu_id)
 
-    def create_sampler(self, method_config: Dict[str, Any], gpu_id: int) -> Sampler:
+    def create_sampler(self, method_config: Dict[str, Any], gpu_id: int):
         """Create a sampler with specific method configuration and GPU assignment."""
         # Import here since it's not imported at the top level
         from runner.inference import Sampler
