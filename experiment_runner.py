@@ -502,21 +502,21 @@ def main():
     parser.add_argument(
         "--noise_scale",
         type=float,
-        default=0.1,
+        default=0.3,
         help="Noise scale for SDE path exploration",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.35,
+        default=0.6,
         help="Lambda for divergence-free vector fields",
     )
 
     parser.add_argument(
         "--branch_interval",
         type=float,
-        default=0.2,
+        default=0.1,
         help="Time interval between branches (0.0 = every timestep, 0.1 = every 0.1 time units)",
     )
 
