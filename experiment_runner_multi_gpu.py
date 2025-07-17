@@ -40,8 +40,8 @@ except RuntimeError:
             "Multiprocessing start method must be 'spawn' for CUDA compatibility"
         )
 
-from runner.inference_methods import get_inference_method
-from runner.inference import Sampler
+# Note: runner.inference_methods and runner.inference imports are now done inside worker function
+# to ensure GEOMSTATS_BACKEND is set before importing
 from omegaconf import DictConfig, OmegaConf
 
 
@@ -138,6 +138,9 @@ class MultiGPUExperimentRunner:
 
     def create_sampler(self, method_config: Dict[str, Any], gpu_id: int) -> Sampler:
         """Create a sampler with specific method configuration and GPU assignment."""
+        # Import here since it's not imported at the top level
+        from runner.inference import Sampler
+
         conf = OmegaConf.create(self.base_conf)
 
         # Update method configuration
@@ -213,10 +216,19 @@ class MultiGPUExperimentRunner:
         """Worker function to run a single experiment on a specific GPU."""
         method_config, gpu_id, result_queue = experiment_data
 
-        # Set environment variable that affects geomstats backend
-        # This line magically changes some tensors to double precision
-        # so we need to reset the default dtype later (like in train.py)
+        # Set environment variable that affects geomstats backend BEFORE any imports
+        # This must be done before importing any modules that might use geomstats
         os.environ["GEOMSTATS_BACKEND"] = "pytorch"
+
+        # Now we can safely import the required modules
+        import sys
+        import logging
+        import time
+        import numpy as np
+        import torch
+        from omegaconf import OmegaConf
+        from runner.inference_methods import get_inference_method
+        from runner.inference import Sampler
 
         # Set the GPU for this process using torch.cuda.set_device
         # This allows PyTorch to see all GPUs but use the specific one
