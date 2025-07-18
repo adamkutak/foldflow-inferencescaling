@@ -359,6 +359,9 @@ class MultiGPUExperimentRunner:
         """Run all experiments with different methods and branch counts using multiple GPUs."""
         experiments = []
 
+        # 1. Baseline: Standard sampling
+        experiments.append({"method": "standard", "config": {}})
+
         # Random Search + Divergence-free ODE with different branch counts
         for n_branches in self.args.branch_counts:
             experiments.append(
@@ -617,7 +620,7 @@ def main():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=16,
+        default=64,
         help="Number of samples to generate per method",
     )
 
