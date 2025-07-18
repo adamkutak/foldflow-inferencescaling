@@ -148,7 +148,7 @@ class Sampler:
         # Handle legacy best_of_n configuration
         if hasattr(self._sample_conf, "best_of_n") and self._sample_conf.best_of_n > 1:
             method_name = "best_of_n"
-            method_config = {"n_samples": self._sample_conf.best_of_n}
+            method_config = {"num_branches": self._sample_conf.best_of_n}
 
         self._log.info(f"Using inference method: {method_name}")
         self.inference_method = get_inference_method(method_name, self, method_config)
@@ -494,7 +494,7 @@ class Sampler:
         """Legacy best_of_n_sample method."""
         # Use the new inference method system
         best_of_n_method = get_inference_method(
-            "best_of_n", self, {"n_samples": n_samples, "temp_dir": temp_dir}
+            "best_of_n", self, {"num_branches": n_samples, "temp_dir": temp_dir}
         )
         return best_of_n_method.sample(sample_length, context)
 
