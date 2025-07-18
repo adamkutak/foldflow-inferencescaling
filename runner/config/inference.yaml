@@ -54,7 +54,7 @@ inference:
     # Method-specific configuration
     method_config:
       # Best-of-N configuration
-      n_samples: 4  # Number of samples to generate and select best from
+      num_branches: 4  # Number of samples to generate and select best from
       selector: "tm_score"  # Scoring function: "tm_score" or "rmsd"
       
       # SDE Path Exploration configuration (when using sde_path_exploration)
