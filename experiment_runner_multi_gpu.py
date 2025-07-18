@@ -413,7 +413,7 @@ class MultiGPUExperimentRunner:
                 {
                     "method": "best_of_n",
                     "config": {
-                        "n_samples": n_branches,
+                        "num_branches": n_branches,
                         "selector": self.args.scoring_function,
                     },
                 }
