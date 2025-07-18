@@ -272,7 +272,7 @@ class ExperimentRunner:
         experiments = []
 
         # 1. Baseline: Standard sampling
-        # experiments.append({"method": "standard", "config": {}})
+        experiments.append({"method": "standard", "config": {}})
 
         # Random Search + Divergence-free ODE with different branch counts
         for n_branches in self.args.branch_counts:
