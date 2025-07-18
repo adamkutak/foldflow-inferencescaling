@@ -281,15 +281,15 @@ class BestOfNInference(InferenceMethod):
         self, sample_length: int, context: Optional[torch.Tensor] = None
     ) -> Dict[str, Any]:
         """Generate N samples and return the best one."""
-        n_samples = self.config.get("n_samples", 5)
+        num_branches = self.config.get("num_branches", 5)
         selector = self.config.get("selector", "tm_score")
         temp_dir = self.config.get("temp_dir", None)
 
-        self._log.info(f"Running Best-of-N sampling with N={n_samples}")
+        self._log.info(f"Running Best-of-N sampling with N={num_branches}")
 
         if temp_dir is None:
             temp_dir = os.path.join(
-                self.sampler._output_dir, f"best_of_{n_samples}_temp"
+                self.sampler._output_dir, f"best_of_{num_branches}_temp"
             )
             os.makedirs(temp_dir, exist_ok=True)
 
@@ -299,8 +299,8 @@ class BestOfNInference(InferenceMethod):
         best_score = float("-inf")
         best_metrics = None
 
-        for i in range(n_samples):
-            self._log.info(f"Generating sample {i+1}/{n_samples}")
+        for i in range(num_branches):
+            self._log.info(f"Generating sample {i+1}/{num_branches}")
             sample_output = self.sampler._base_sample(sample_length, context)
 
             # Evaluate the sample
@@ -313,7 +313,7 @@ class BestOfNInference(InferenceMethod):
                 self._log.info(f"New best sample found: score = {best_score:.4f}")
 
         self._log.info(
-            f"Best-of-{n_samples} sampling complete. Best score: {best_score:.4f}"
+            f"Best-of-{num_branches} sampling complete. Best score: {best_score:.4f}"
         )
 
         return {"sample": best_sample, "score": best_score, "method": "best_of_n"}
