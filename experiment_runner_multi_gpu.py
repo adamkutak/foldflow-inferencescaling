@@ -620,14 +620,14 @@ def main():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=64,
+        default=50,
         help="Number of samples to generate per method",
     )
 
     parser.add_argument(
         "--sample_length",
         type=int,
-        default=50,
+        default=100,
         help="Length of protein samples to generate",
     )
 
