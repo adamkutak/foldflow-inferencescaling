@@ -642,14 +642,14 @@ def main():
     parser.add_argument(
         "--noise_scale",
         type=float,
-        default=0.2,
+        default=0.4,
         help="Noise scale for SDE path exploration",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.45,
+        default=0.8,
         help="Lambda for divergence-free vector fields",
     )
 
