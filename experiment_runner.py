@@ -487,7 +487,7 @@ def main():
     parser.add_argument(
         "--sample_length",
         type=int,
-        default=50,
+        default=64,
         help="Length of protein samples to generate",
     )
 
