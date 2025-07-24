@@ -422,6 +422,23 @@ class MultiGPUExperimentRunner:
                 }
             )
 
+        # Sort experiments to prioritize higher branch counts (longer experiments) first
+        # Keep baseline (standard) first, then sort others by branch count descending
+        baseline_experiments = [
+            exp for exp in experiments if exp["method"] == "standard"
+        ]
+        branched_experiments = [
+            exp for exp in experiments if exp["method"] != "standard"
+        ]
+
+        # Sort branched experiments by num_branches in descending order (highest first)
+        branched_experiments.sort(
+            key=lambda x: x.get("config", {}).get("num_branches", 0), reverse=True
+        )
+
+        # Combine: baseline first, then sorted branched experiments
+        experiments = baseline_experiments + branched_experiments
+
         # Create a manager for shared result queue
         manager = Manager()
         result_queue = manager.Queue()
