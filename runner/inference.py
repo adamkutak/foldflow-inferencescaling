@@ -231,6 +231,14 @@ class Sampler:
                 else:
                     sample_output = sample_result
 
+                # Debug: Log final shapes before saving
+                self._log.info(
+                    f"DEBUG: Before save_traj, prot_traj shape: {sample_output['prot_traj'].shape}"
+                )
+                self._log.info(
+                    f"DEBUG: Before save_traj, sample_output keys: {list(sample_output.keys())}"
+                )
+
                 traj_paths = self.save_traj(
                     sample_output["prot_traj"],
                     sample_output["rigid_0_traj"],
