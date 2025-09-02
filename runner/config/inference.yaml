@@ -73,11 +73,11 @@ inference:
       noise_schedule_end_factor: 0.7  # Linear noise decrease factor (1.0 -> 0.7 by end)
       
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
-      num_branches: 4  # Number of branches per round
-      num_keep: 1  # Number of top samples to keep each round
-      lambda_div: 0.2
-      particle_repulsion_factor: 0.02
-      noise_schedule_end_factor: 0.7
+      # num_branches: 4  # Number of branches per round
+      # num_keep: 1  # Number of top samples to keep each round
+      # lambda_div: 0.2
+      # particle_repulsion_factor: 0.02
+      # noise_schedule_end_factor: 0.7
       
       # SDE Path Exploration configuration (when using sde_path_exploration)
       # num_branches: 4  # Number of branches per step
