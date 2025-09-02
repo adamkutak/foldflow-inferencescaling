@@ -954,11 +954,39 @@ class SDEPathExplorationInference(InferenceMethod):
                 f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
             )
 
-        # Return best intermediate sample (which is the final result after simulate_to_completion)
+        # After branching, simulate remaining samples to completion and compare with best intermediate
+        final_samples = []
+        for sample_idx, feats in enumerate(current_samples):
+            self._log.info(f"Finalizing sample {sample_idx + 1}/{len(current_samples)}")
+
+            # Simulate this sample to completion
+            final_sample = self._simulate_to_completion(feats, min_t, dt, [], context)
+            final_samples.append(final_sample)
+
+            # Score the final sample
+            final_score = score_fn(final_sample, sample_length)
+            self._log.info(f"  Final sample {sample_idx + 1} score: {final_score:.4f}")
+
+            # Compare with best intermediate found during branching
+            if final_score > best_intermediate_score:
+                best_intermediate_score = final_score
+                best_intermediate_sample = final_sample
+                self._log.info(
+                    f"  New global best found in final samples: {final_score:.4f}"
+                )
+
+        self._log.info(f"SDE PATH EXPLORATION COMPLETE")
+        self._log.info(f"  Total branching steps: {len(branching_steps)}")
         self._log.info(
-            f"  Returning best intermediate sample with score: {best_intermediate_score:.4f}"
+            f"  Branching occurred at: {[(idx, f'{t:.4f}') for idx, t in branching_steps]}"
         )
-        return best_intermediate_sample
+        self._log.info(f"  Global best score: {best_intermediate_score:.4f}")
+
+        return {
+            "sample": best_intermediate_sample,
+            "score": best_intermediate_score,
+            "method": "sde_path_exploration",
+        }
 
 
 class NoiseSearchInference(InferenceMethod):
@@ -3533,6 +3561,328 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
         return best_intermediate_sample
 
 
+class RandomSearchNoiseInference(NoiseSearchInference):
+    """Combined random search and noise search method.
+
+    First performs random search over N initial noises to select the best ones,
+    then uses those selected noises as starting points for noise search refinement.
+    """
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using random search + noise search."""
+        num_branches = self.config.get("num_branches", 2)
+        num_keep = self.config.get("num_keep", 1)
+        selector = self.config.get("selector", "tm_score")
+        num_rounds = self.config.get("num_rounds", 3)
+        noise_type = self.config.get("noise_type", "sde")
+
+        self._log.info(
+            f"Running random search + noise search: {num_branches} random initial noises -> "
+            f"noise search with {num_branches} branches, {num_rounds} rounds, keeping {num_keep}"
+        )
+        self._log.info(f"  Noise type: {noise_type}")
+
+        # Step 1: Random search to select best initial noises
+        self._log.info(f"Phase 1: Random search over {num_branches} initial noises")
+
+        selected_noises, best_random_score, best_random_sample = (
+            self._random_search_phase(num_branches, selector, sample_length, context)
+        )
+
+        # Step 2: Use selected noises for noise search refinement
+        self._log.info(
+            f"Phase 2: Noise search refinement with {len(selected_noises)} selected noises"
+        )
+
+        best_sample = self._noise_search_phase(
+            selected_noises,
+            num_branches,
+            num_keep,
+            selector,
+            sample_length,
+            num_rounds,
+            context,
+            noise_type,
+            best_random_score,
+            best_random_sample,
+        )
+
+        return best_sample
+
+    def _random_search_phase(self, num_branches, selector, sample_length, context):
+        """Phase 1: Random search to identify best initial noises."""
+        score_fn = self.get_score_function(selector)
+        candidates = []
+
+        # Track best sample across random search
+        best_random_score = float("-inf")
+        best_random_sample = None
+
+        for i in range(num_branches):
+            self._log.debug(f"  Random sample {i+1}/{num_branches}")
+
+            # Generate random initial features
+            init_feats = self.generate_initial_features(sample_length)
+
+            # Sample to completion using the specific initial features
+            sample_result = self._sample_from_init_feats(init_feats, context)
+            score = score_fn(sample_result, sample_length)
+
+            candidates.append(
+                {"init_feats": init_feats, "score": score, "sample": sample_result}
+            )
+            self._log.debug(f"    Score: {score:.4f}")
+
+            # Track best sample
+            if score > best_random_score:
+                best_random_score = score
+                best_random_sample = sample_result
+                self._log.info(
+                    f"    New best random search sample: score = {score:.4f}"
+                )
+
+        # Sort by score (descending)
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        # Keep top k candidates based on num_keep
+        selected = candidates[:num_keep]
+
+        scores_str = [f"{c['score']:.4f}" for c in selected]
+        self._log.info(
+            f"Selected {len(selected)} best initial noises with scores: {scores_str}"
+        )
+
+        return (
+            [c["init_feats"] for c in selected],
+            best_random_score,
+            best_random_sample,
+        )
+
+    def _noise_search_phase(
+        self,
+        selected_noises,
+        num_branches,
+        num_keep,
+        selector,
+        sample_length,
+        num_rounds,
+        context,
+        noise_type,
+        best_random_score,
+        best_random_sample,
+    ):
+        """Phase 2: Noise search refinement from selected noises."""
+        score_fn = self.get_score_function(selector)
+
+        # Track global best across all noise search runs
+        global_best_score = best_random_score
+        global_best_sample = best_random_sample
+
+        for i, init_noise in enumerate(selected_noises):
+            self._log.info(
+                f"  Running noise search from selected noise {i+1}/{len(selected_noises)}"
+            )
+
+            # Run noise search starting from this selected noise as the initial candidate
+            if noise_type == "sde":
+                noise_scale = self.config.get("noise_scale", 0.05)
+                result = self._noise_search_sde_custom_init(
+                    init_noise,
+                    num_branches,
+                    num_keep,
+                    noise_scale,
+                    selector,
+                    sample_length,
+                    num_rounds,
+                    context,
+                )
+            elif noise_type in ["divfree", "divfree_max"]:
+                lambda_div = self.config.get("lambda_div", 0.2)
+                particle_repulsion_factor = self.config.get(
+                    "particle_repulsion_factor", 0.02
+                )
+                noise_schedule_end_factor = self.config.get(
+                    "noise_schedule_end_factor", 0.7
+                )
+                result = self._noise_search_divfree_unified(
+                    init_noise,
+                    num_branches,
+                    num_keep,
+                    lambda_div,
+                    particle_repulsion_factor,
+                    noise_schedule_end_factor,
+                    selector,
+                    sample_length,
+                    num_rounds,
+                    context,
+                    noise_type,
+                )
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
+
+            # Update global best if we found a better one
+            if result["score"] > global_best_score:
+                global_best_score = result["score"]
+                global_best_sample = result["sample"]
+                self._log.info(
+                    f"    New global best found in noise search: score = {result['score']:.4f}"
+                )
+
+        # Return the global best sample
+        self._log.info(
+            f"Random search + noise search complete. Global best score: {global_best_score:.4f}"
+        )
+        return {
+            "sample": global_best_sample,
+            "score": global_best_score,
+            "method": f"random_search_noise_{noise_type}",
+        }
+
+    def generate_initial_features(self, sample_length):
+        """Generate random initial features."""
+        # Initialize features
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        return init_feats
+
+    def _sample_from_init_feats(self, init_feats, context):
+        """Sample to completion starting from specific initial features."""
+        # Use the sampler's inference function directly with the provided initial features
+        sample_out = self.sampler.exp.inference_fn(
+            init_feats,
+            num_t=self.sampler._fm_conf.num_t,
+            min_t=self.sampler._fm_conf.min_t,
+            aux_traj=True,
+            noise_scale=self.sampler._fm_conf.noise_scale,
+            context=context,
+        )
+        return tree.map_structure(lambda x: x[:, 0], sample_out)
+
+    def _noise_search_sde_custom_init(
+        self,
+        init_feats,
+        num_branches,
+        num_keep,
+        noise_scale,
+        selector,
+        sample_length,
+        num_rounds,
+        context,
+    ):
+        """Modified SDE noise search that starts with custom initial features."""
+        # Instead of generating random initial features, start with the provided init_feats
+        score_fn = self.get_score_function(selector)
+
+        # Set up time steps for rounds
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Define round start times (same as in regular noise search)
+        round_start_times = np.linspace(1.0, min_t, num_rounds + 1)[:-1]
+
+        # Start with the provided initial features as our first candidate
+        current_candidates = [init_feats]
+        best_overall_score = float("-inf")
+        best_overall_sample = None
+
+        for round_idx in range(num_rounds):
+            start_t = round_start_times[round_idx]
+            self._log.info(
+                f"ROUND {round_idx + 1}/{num_rounds}: Starting from t={start_t:.4f}"
+            )
+
+            round_samples = []
+            round_scores = []
+
+            for candidate_idx, candidate_feats in enumerate(current_candidates):
+                self._log.info(
+                    f"  Processing candidate {candidate_idx + 1}/{len(current_candidates)}"
+                )
+
+                for branch_idx in range(num_branches):
+                    # Create a copy of the candidate features
+                    branch_feats = tree.map_structure(
+                        lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                        candidate_feats,
+                    )
+
+                    # Run SDE sampling from start_t to min_t
+                    completed_sample = self._sde_simulate_from_time(
+                        branch_feats, start_t, dt, reverse_steps, noise_scale, context
+                    )
+
+                    # Evaluate the completed sample
+                    score = score_fn(completed_sample, sample_length)
+                    round_samples.append(completed_sample)
+                    round_scores.append(score)
+
+                    self._log.debug(f"    Branch {branch_idx}: score = {score:.4f}")
+
+                    # Track overall best
+                    if score > best_overall_score:
+                        best_overall_score = score
+                        best_overall_sample = completed_sample
+
+            # Select top-k samples for next round (if not the last round)
+            if round_idx < num_rounds - 1:
+                round_scores_tensor = torch.tensor(round_scores)
+                top_k_indices = torch.topk(
+                    round_scores_tensor, k=min(num_keep, len(round_samples))
+                )[1]
+
+                # Extract intermediate states for selected samples at the next round's start time
+                next_start_t = round_start_times[round_idx + 1]
+                current_candidates = []
+
+                for idx in top_k_indices:
+                    # Get the intermediate state from the sample at next_start_t
+                    intermediate_state = self._extract_intermediate_state(
+                        round_samples[idx], next_start_t, reverse_steps
+                    )
+                    current_candidates.append(intermediate_state)
+
+        self._log.info(f"CUSTOM INIT SDE NOISE SEARCH COMPLETE")
+        self._log.info(f"  Best overall score: {best_overall_score:.4f}")
+
+        return {
+            "sample": best_overall_sample,
+            "score": best_overall_score,
+            "method": "noise_search_sde_custom_init",
+        }
+
+
 def get_inference_method(
     method_name: str, sampler, config: Dict[str, Any]
 ) -> InferenceMethod:
@@ -3550,6 +3900,7 @@ def get_inference_method(
         "divergence_free_simple": DivergenceFreeSimpleInference,
         "divfree_max_simple": DivFreeMaxSimpleInference,
         "random_search_divfree": RandomSearchDivFreeInference,
+        "random_search_noise": RandomSearchNoiseInference,
     }
 
     if method_name not in methods:
