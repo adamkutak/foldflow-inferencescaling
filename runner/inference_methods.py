@@ -3186,7 +3186,7 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         noise_schedule_end_factor,
         context=None,
     ):
-        """Simple divergence-free max sampling without path exploration."""
+        """Synchronized divergence-free max sampling for proper particle guidance."""
         device = init_feats["rigids_t"].device
         num_t = self.sampler._fm_conf.num_t
         min_t = self.sampler._fm_conf.min_t
@@ -3198,16 +3198,32 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         all_bb_prots = []
         all_trans_0_pred = []
         all_bb_0_pred = []
+        all_feature_states = (
+            []
+        )  # Store complete feature states for proper intermediate state extraction
         final_psi_pred = None
 
         sample_feats = init_feats.copy()
 
         with torch.no_grad():
             for step_idx, t in enumerate(reverse_steps):
-                # Apply divergence-free max step
+                # Set time features
                 sample_feats = self.sampler.exp._set_t_feats(
                     sample_feats, t, torch.ones((1,)).to(device)
                 )
+
+                # Store complete feature state for proper intermediate state extraction
+                feature_state_copy = {}
+                for key, value in sample_feats.items():
+                    if torch.is_tensor(value):
+                        feature_state_copy[key] = value.clone().detach()
+                    else:
+                        feature_state_copy[key] = (
+                            value.copy() if hasattr(value, "copy") else value
+                        )
+                all_feature_states.append(feature_state_copy)
+
+                # Get model prediction
                 model_out = self.sampler.model(sample_feats)
 
                 rot_vectorfield = model_out["rot_vectorfield"]
@@ -3215,7 +3231,7 @@ class DivFreeMaxSimpleInference(InferenceMethod):
                 rigid_pred = model_out["rigids"]
                 psi_pred = model_out["psi"]
 
-                # Generate divergence-free max noise using the utility function
+                # Generate divergence-free max noise using synchronized approach
                 rigids_tensor = sample_feats["rigids_t"]
                 t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
 
@@ -3294,15 +3310,16 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         all_trans_0_pred = flip(all_trans_0_pred)
         all_bb_0_pred = flip(all_bb_0_pred)
 
+        # Flip feature states trajectory
+        all_feature_states = all_feature_states[::-1]
+
         sample_result = {
             "prot_traj": all_bb_prots,
             "rigid_traj": all_rigids,
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
-            "feature_states_traj": all_feature_states[
-                ::-1
-            ],  # Complete feature states for proper intermediate extraction
+            "feature_states_traj": all_feature_states,  # Complete feature states for proper intermediate extraction
         }
 
         return sample_result
