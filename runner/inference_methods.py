@@ -22,7 +22,7 @@ from foldflow.data import utils as du
 from foldflow.data import residue_constants, all_atom
 from openfold.utils import rigid_utils as ru
 from tools.analysis import metrics
-from runner.divergence_free_utils import divfree_swirl_si
+from runner.divergence_free_utils import divfree_swirl_si, divfree_max_noise
 
 
 class InferenceMethod(ABC):
@@ -46,8 +46,14 @@ class InferenceMethod(ABC):
             return self._tm_score_function
         elif selector == "rmsd":
             return self._rmsd_function
+        elif selector == "dual_score":
+            return self._dual_score_function
         else:
             raise ValueError(f"Unknown selector: {selector}")
+
+    def get_score_functions(self) -> Dict[str, Callable]:
+        """Get all scoring functions for comprehensive evaluation."""
+        return {"tm_score": self._tm_score_function, "rmsd": self._rmsd_function}
 
     def _tm_score_function(
         self, sample_output: Dict[str, Any], sample_length: int
@@ -144,6 +150,48 @@ class InferenceMethod(ABC):
         finally:
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
+
+    def _dual_score_function(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> Dict[str, float]:
+        """Evaluate sample using both TM-score and RMSD."""
+        temp_dir = os.path.join(self.sampler._output_dir, "temp_eval")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        try:
+            traj_paths = self.sampler.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=temp_dir,
+            )
+
+            pdb_path = traj_paths["sample_path"]
+            sc_output_dir = os.path.join(temp_dir, "self_consistency")
+            os.makedirs(sc_output_dir, exist_ok=True)
+            shutil.copy(
+                pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
+            )
+
+            sc_results = self.sampler.run_self_consistency(
+                sc_output_dir, pdb_path, motif_mask=None
+            )
+
+            return {
+                "tm_score": sc_results["tm_score"].mean(),
+                "rmsd": sc_results["rmsd"].mean(),
+            }
+
+        finally:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+    def get_rmsd_value(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> float:
+        """Get the actual RMSD value (positive) for analysis."""
+        scores = self._dual_score_function(sample_output, sample_length)
+        return scores["rmsd"]
 
     def _simulate_to_completion(self, feats, current_t, dt, remaining_steps, context):
         """Simulate a branch to completion deterministically from current_t to min_t."""
@@ -756,6 +804,852 @@ class SDEPathExplorationInference(InferenceMethod):
         return best_intermediate_sample
 
 
+class NoiseSearchInference(InferenceMethod):
+    """Base noise search inference with multi-round refinement. 
+    
+    Can use different noise functions (SDE, DivFree, DivFreeMax) based on noise_type.
+    """
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using noise search with configurable noise type."""
+        num_branches = self.config.get("num_branches", 8)
+        num_keep = self.config.get("num_keep", 2)
+        selector = self.config.get("selector", "tm_score")
+        num_rounds = self.config.get("num_rounds", 3)
+        noise_type = self.config.get("noise_type", "sde")  # sde, divfree, divfree_max
+        
+        # Get noise-specific parameters
+        if noise_type == "sde":
+            noise_scale = self.config.get("noise_scale", 0.05)
+            self._log.info(
+                f"Running Noise Search SDE with {num_branches} branches, keeping {num_keep}, {num_rounds} rounds"
+            )
+        elif noise_type == "divfree":
+            lambda_div = self.config.get("lambda_div", 0.2)
+            self._log.info(
+                f"Running Noise Search DivFree with {num_branches} branches, keeping {num_keep}, {num_rounds} rounds"
+            )
+        elif noise_type == "divfree_max":
+            lambda_div = self.config.get("lambda_div", 0.2)
+            particle_repulsion_factor = self.config.get("particle_repulsion_factor", 0.02)
+            noise_schedule_end_factor = self.config.get("noise_schedule_end_factor", 0.7)
+            self._log.info(
+                f"Running Noise Search DivFreeMax with {num_branches} branches, keeping {num_keep}, {num_rounds} rounds"
+            )
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}")
+
+        self._log.info(f"  Noise type: {noise_type}")
+
+        # Initialize features
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        # Run noise search with multiple rounds based on noise type
+        if noise_type == "sde":
+            sample_out = self._noise_search_sde(
+                init_feats, num_branches, num_keep, noise_scale, 
+                selector, sample_length, num_rounds, context,
+            )
+        elif noise_type == "divfree":
+            sample_out = self._noise_search_divfree_unified(
+                init_feats, num_branches, num_keep, lambda_div, None, None,
+                selector, sample_length, num_rounds, context, noise_type
+            )
+        elif noise_type == "divfree_max":
+            sample_out = self._noise_search_divfree_unified(
+                init_feats, num_branches, num_keep, lambda_div, particle_repulsion_factor,
+                noise_schedule_end_factor, selector, sample_length, num_rounds, context, noise_type
+            )
+
+        return sample_out
+
+    def _noise_search_sde(
+        self,
+        data_init,
+        num_branches,
+        num_keep,
+        noise_scale,
+        selector,
+        sample_length,
+        num_rounds,
+        context,
+    ):
+        """Core noise search SDE logic with multi-round refinement."""
+        self._log.info(f"NOISE SEARCH SDE START")
+        self._log.info(f"  num_branches={num_branches}, num_keep={num_keep}")
+        self._log.info(f"  noise_scale={noise_scale}, num_rounds={num_rounds}")
+
+        score_fn = self.get_score_function(selector)
+        device = data_init["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Calculate round start times - new 9-round schedule
+        predefined_schedule = [0.0, 0.2, 0.4, 0.6, 0.74, 0.8, 0.86, 0.92, 0.96]
+        
+        round_start_times = []
+        for round_idx in range(num_rounds):
+            if round_idx < len(predefined_schedule):
+                # Use predefined schedule (note: these are progress values, need to convert to t values)
+                progress = predefined_schedule[round_idx]
+                # Convert progress to t: progress 0 = t=1.0, progress 1 = t=min_t
+                start_t = 1.0 - progress * (1.0 - min_t)
+            else:
+                # Fallback for additional rounds beyond predefined schedule
+                start_t = max(min_t, min_t + 0.01 * (num_rounds - round_idx))
+            round_start_times.append(start_t)
+
+        self._log.info(f"  Round start times: {round_start_times}")
+
+        # Track the best samples across rounds
+        current_candidates = [data_init]
+        best_overall_sample = None
+        best_overall_score = float("-inf")
+
+        for round_idx in range(num_rounds):
+            start_t = round_start_times[round_idx]
+            self._log.info(f"ROUND {round_idx + 1}/{num_rounds}: Starting from t={start_t:.4f}")
+
+            round_samples = []
+            round_scores = []
+
+            for candidate_idx, candidate_feats in enumerate(current_candidates):
+                self._log.info(f"  Processing candidate {candidate_idx + 1}/{len(current_candidates)}")
+
+                # Generate multiple samples from this candidate
+                for branch_idx in range(num_branches):
+                    # Create a copy of the candidate features
+                    branch_feats = tree.map_structure(
+                        lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                        candidate_feats,
+                    )
+
+                    # Run SDE sampling from start_t to min_t
+                    completed_sample = self._sde_simulate_from_time(
+                        branch_feats, start_t, dt, reverse_steps, noise_scale, context
+                    )
+
+                    # Evaluate the completed sample
+                    score = score_fn(completed_sample, sample_length)
+                    round_samples.append(completed_sample)
+                    round_scores.append(score)
+
+                    self._log.debug(f"    Branch {branch_idx}: score = {score:.4f}")
+
+                    # Track overall best
+                    if score > best_overall_score:
+                        best_overall_score = score
+                        best_overall_sample = completed_sample
+
+            # Select top-k samples for next round (if not the last round)
+            if round_idx < num_rounds - 1:
+                round_scores_tensor = torch.tensor(round_scores)
+                top_k_indices = torch.topk(round_scores_tensor, k=min(num_keep, len(round_samples)))[1]
+
+                self._log.info(f"  Selected {len(top_k_indices)} samples for next round")
+                self._log.info(f"  Selected scores: {[round_scores[i]:.4f for i in top_k_indices]}")
+
+                # Extract intermediate states for selected samples at the next round's start time
+                next_start_t = round_start_times[round_idx + 1]
+                current_candidates = []
+
+                for idx in top_k_indices:
+                    # Get the intermediate state from the sample at next_start_t
+                    intermediate_state = self._extract_intermediate_state(
+                        round_samples[idx], next_start_t, reverse_steps
+                    )
+                    current_candidates.append(intermediate_state)
+
+            else:
+                # Last round - just find the best sample
+                best_round_idx = np.argmax(round_scores)
+                best_round_score = round_scores[best_round_idx]
+                self._log.info(f"  Best sample in final round: score = {best_round_score:.4f}")
+
+        self._log.info(f"NOISE SEARCH SDE COMPLETE")
+        self._log.info(f"  Best overall score: {best_overall_score:.4f}")
+
+        return {"sample": best_overall_sample, "score": best_overall_score, "method": "noise_search_sde"}
+
+    def _sde_simulate_from_time(self, init_feats, start_t, dt, reverse_steps, noise_scale, context):
+        """Simulate SDE from a given start time to completion."""
+        device = init_feats["rigids_t"].device
+        min_t = self.sampler._fm_conf.min_t
+
+        # Find the step index for start_t
+        start_step_idx = 0
+        for i, t in enumerate(reverse_steps):
+            if t <= start_t:
+                start_step_idx = i
+                break
+
+        # Get the steps from start_t to min_t
+        simulation_steps = reverse_steps[start_step_idx:]
+
+        # Initialize trajectory collection
+        all_rigids = []
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
+        sample_feats = init_feats.copy()
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(simulation_steps):
+                # Apply SDE step with noise
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(sample_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                # Add noise for SDE
+                noise_rot = torch.randn_like(rot_vectorfield) * noise_scale * np.sqrt(dt)
+                noise_trans = torch.randn_like(trans_vectorfield) * noise_scale * np.sqrt(dt)
+
+                rot_vectorfield = rot_vectorfield + noise_rot
+                trans_vectorfield = trans_vectorfield + noise_trans
+
+                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
+                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                # Collect trajectory data
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Calculate x0 prediction
+                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectory so that it starts from t=0
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        sample_result = {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
+
+        # Remove batch dimension
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+        )
+
+    def _noise_search_divfree_unified(
+        self,
+        data_init,
+        num_branches,
+        num_keep,
+        lambda_div,
+        particle_repulsion_factor,
+        noise_schedule_end_factor,
+        selector,
+        sample_length,
+        num_rounds,
+        context,
+        noise_type,
+    ):
+        """Unified noise search divergence-free logic that works for both divfree and divfree_max."""
+        method_name = f"NOISE SEARCH {noise_type.upper()}"
+        self._log.info(f"{method_name} START")
+        self._log.info(f"  num_branches={num_branches}, num_keep={num_keep}")
+        
+        if noise_type == "divfree":
+            self._log.info(f"  lambda_div={lambda_div}, num_rounds={num_rounds}")
+        elif noise_type == "divfree_max":
+            self._log.info(f"  lambda_div={lambda_div}, repulsion={particle_repulsion_factor}, end_factor={noise_schedule_end_factor}, num_rounds={num_rounds}")
+
+        score_fn = self.get_score_function(selector)
+        device = data_init["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Calculate round start times - new 9-round schedule
+        predefined_schedule = [0.0, 0.2, 0.4, 0.6, 0.74, 0.8, 0.86, 0.92, 0.96]
+        
+        round_start_times = []
+        for round_idx in range(num_rounds):
+            if round_idx < len(predefined_schedule):
+                # Use predefined schedule (note: these are progress values, need to convert to t values)
+                progress = predefined_schedule[round_idx]
+                # Convert progress to t: progress 0 = t=1.0, progress 1 = t=min_t
+                start_t = 1.0 - progress * (1.0 - min_t)
+            else:
+                # Fallback for additional rounds beyond predefined schedule
+                start_t = max(min_t, min_t + 0.01 * (num_rounds - round_idx))
+            round_start_times.append(start_t)
+
+        self._log.info(f"  Round start times: {round_start_times}")
+
+        # Track the best samples across rounds
+        current_candidates = [data_init]
+        best_overall_sample = None
+        best_overall_score = float("-inf")
+
+        for round_idx in range(num_rounds):
+            start_t = round_start_times[round_idx]
+            self._log.info(f"ROUND {round_idx + 1}/{num_rounds}: Starting from t={start_t:.4f}")
+
+            round_samples = []
+            round_scores = []
+
+            for candidate_idx, candidate_feats in enumerate(current_candidates):
+                self._log.info(f"  Processing candidate {candidate_idx + 1}/{len(current_candidates)}")
+
+                if noise_type == "divfree_max":
+                    # Use synchronized timestep approach for divfree_max (enables particle repulsion)
+                    completed_samples = self._divfree_max_simulate_synchronized(
+                        candidate_feats, start_t, dt, reverse_steps, lambda_div,
+                        particle_repulsion_factor, noise_schedule_end_factor, context, num_branches
+                    )
+                    
+                    # Evaluate all completed samples
+                    for branch_idx, completed_sample in enumerate(completed_samples):
+                        score = score_fn(completed_sample, sample_length)
+                        round_samples.append(completed_sample)
+                        round_scores.append(score)
+                        
+                        self._log.debug(f"    Branch {branch_idx}: score = {score:.4f}")
+                        
+                        # Track overall best
+                        if score > best_overall_score:
+                            best_overall_score = score
+                            best_overall_sample = completed_sample
+                
+                else:
+                    # Use sequential approach for divfree (proven working method)
+                    for branch_idx in range(num_branches):
+                        # Create a copy of the candidate features
+                        branch_feats = tree.map_structure(
+                            lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                            candidate_feats,
+                        )
+
+                        # Run divergence-free sampling from start_t to min_t (sequential method)
+                        completed_sample = self._divfree_simulate_from_time_unified(
+                            branch_feats, start_t, dt, reverse_steps, lambda_div, 
+                            particle_repulsion_factor, noise_schedule_end_factor, context, noise_type
+                        )
+
+                        # Evaluate the completed sample
+                        score = score_fn(completed_sample, sample_length)
+                        round_samples.append(completed_sample)
+                        round_scores.append(score)
+
+                        self._log.debug(f"    Branch {branch_idx}: score = {score:.4f}")
+
+                        # Track overall best
+                        if score > best_overall_score:
+                            best_overall_score = score
+                            best_overall_sample = completed_sample
+
+            # Select top-k samples for next round (if not the last round)
+            if round_idx < num_rounds - 1:
+                round_scores_tensor = torch.tensor(round_scores)
+                top_k_indices = torch.topk(round_scores_tensor, k=min(num_keep, len(round_samples)))[1]
+
+                self._log.info(f"  Selected {len(top_k_indices)} samples for next round")
+                self._log.info(f"  Selected scores: {[round_scores[i]:.4f for i in top_k_indices]}")
+
+                # Extract intermediate states for selected samples at the next round's start time
+                next_start_t = round_start_times[round_idx + 1]
+                current_candidates = []
+
+                for idx in top_k_indices:
+                    # Get the intermediate state from the sample at next_start_t
+                    intermediate_state = self._extract_intermediate_state(
+                        round_samples[idx], next_start_t, reverse_steps
+                    )
+                    current_candidates.append(intermediate_state)
+
+            else:
+                # Last round - just find the best sample
+                best_round_idx = np.argmax(round_scores)
+                best_round_score = round_scores[best_round_idx]
+                self._log.info(f"  Best sample in final round: score = {best_round_score:.4f}")
+
+        self._log.info(f"{method_name} COMPLETE")
+        self._log.info(f"  Best overall score: {best_overall_score:.4f}")
+
+        return {"sample": best_overall_sample, "score": best_overall_score, "method": f"noise_search_{noise_type}"}
+
+    def _divfree_simulate_from_time_unified(self, init_feats, start_t, dt, reverse_steps, lambda_div, 
+                                            particle_repulsion_factor, noise_schedule_end_factor, context, noise_type):
+        """Unified simulate divergence-free from a given start time to completion.
+        
+        Works for both 'divfree' and 'divfree_max' noise types.
+        """
+        device = init_feats["rigids_t"].device
+        min_t = self.sampler._fm_conf.min_t
+
+        # Find the step index for start_t
+        start_step_idx = 0
+        for i, t in enumerate(reverse_steps):
+            if t <= start_t:
+                start_step_idx = i
+                break
+
+        # Get the steps from start_t to min_t
+        simulation_steps = reverse_steps[start_step_idx:]
+
+        # Initialize trajectory collection
+        all_rigids = []
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
+        sample_feats = init_feats.copy()
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(simulation_steps):
+                # Apply divergence-free step
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(sample_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                # Generate divergence-free noise based on noise_type
+                rigids_tensor = sample_feats["rigids_t"]
+                t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
+
+                # Extract rotation matrices and translations
+                rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
+                rot_mats = rigid_obj.get_rots().get_rot_mats()
+                trans_vecs = rigid_obj.get_trans()
+
+                if noise_type == "divfree":
+                    # Standard divergence-free noise
+                    rot_divfree_noise = divfree_swirl_si(rot_mats, t_batch, None, rot_vectorfield)
+                    trans_divfree_noise = divfree_swirl_si(trans_vecs, t_batch, None, trans_vectorfield)
+                    
+                    # Add divergence-free noise to vector fields
+                    rot_vectorfield = rot_vectorfield + lambda_div * rot_divfree_noise
+                    trans_vectorfield = trans_vectorfield + lambda_div * trans_divfree_noise
+                    
+                elif noise_type == "divfree_max":
+                    # Divergence-free max noise with particle repulsion and linear schedule
+                    rot_divfree_noise = divfree_max_noise(
+                        rot_mats, t_batch, rot_vectorfield,
+                        lambda_div=lambda_div,
+                        repulsion_strength=particle_repulsion_factor,
+                        noise_schedule_end_factor=noise_schedule_end_factor,
+                        min_t=min_t
+                    )
+                    trans_divfree_noise = divfree_max_noise(
+                        trans_vecs, t_batch, trans_vectorfield,
+                        lambda_div=lambda_div,
+                        repulsion_strength=particle_repulsion_factor,
+                        noise_schedule_end_factor=noise_schedule_end_factor,
+                        min_t=min_t
+                    )
+                    
+                    # Add divergence-free max noise to vector fields (already scaled in utility)
+                    rot_vectorfield = rot_vectorfield + rot_divfree_noise
+                    trans_vectorfield = trans_vectorfield + trans_divfree_noise
+
+                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
+                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
+
+                # Use the proven, working reverse function approach from original divfree code
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                # Collect trajectory data using proven working approach
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+
+                # Calculate x0 prediction
+                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectories to correct time order
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        sample_result = {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
+
+        # Use proven working batch dimension handling from original divfree code
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+        )
+
+    def _divfree_max_simulate_synchronized(self, candidate_feats, start_t, dt, reverse_steps, lambda_div,
+                                           particle_repulsion_factor, noise_schedule_end_factor, context, num_branches):
+        """Synchronized timestep simulation for divfree_max with particle repulsion between branches.
+        
+        This enables particle repulsion by processing all branches at each timestep simultaneously,
+        allowing repulsion forces to be calculated between the N samples in the virtual batch.
+        """
+        device = candidate_feats["rigids_t"].device
+        min_t = self.sampler._fm_conf.min_t
+
+        # Find the step index for start_t
+        start_step_idx = 0
+        for i, t in enumerate(reverse_steps):
+            if t <= start_t:
+                start_step_idx = i
+                break
+
+        # Get the steps from start_t to min_t
+        simulation_steps = reverse_steps[start_step_idx:]
+
+        # Initialize all branch samples
+        all_branch_feats = []
+        for branch_idx in range(num_branches):
+            branch_feats = tree.map_structure(
+                lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
+                candidate_feats,
+            )
+            all_branch_feats.append(branch_feats)
+
+        # Initialize trajectory collection for all branches
+        all_trajectories = {i: {"rigids": [], "bb_prots": [], "trans_0_pred": [], "bb_0_pred": []} 
+                           for i in range(num_branches)}
+        final_psi_preds = [None] * num_branches
+
+        self._log.debug(f"    Starting synchronized simulation for {num_branches} branches")
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(simulation_steps):
+                # Extract positions from all branches for repulsion calculation
+                branch_positions = []
+                for branch_feats in all_branch_feats:
+                    rigid_obj = ru.Rigid.from_tensor_7(branch_feats["rigids_t"])
+                    positions = rigid_obj.get_trans()  # [1, seq_len, 3]
+                    branch_positions.append(positions[0])  # Remove batch dim -> [seq_len, 3]
+                
+                # Stack into virtual batch for repulsion calculation
+                batch_positions = torch.stack(branch_positions, dim=0)  # [num_branches, seq_len, 3]
+                
+                # Calculate repulsion forces between all branches
+                repulsion_forces = self._calculate_synchronized_repulsion(
+                    batch_positions, particle_repulsion_factor
+                )  # [num_branches, seq_len, 3]
+
+                # Process each branch with its repulsion force
+                for branch_idx, branch_feats in enumerate(all_branch_feats):
+                    # Set time features
+                    branch_feats = self.sampler.exp._set_t_feats(
+                        branch_feats, t, torch.ones((1,)).to(device)
+                    )
+                    
+                    # Get model prediction
+                    model_out = self.sampler.model(branch_feats)
+                    rot_vectorfield = model_out["rot_vectorfield"]
+                    trans_vectorfield = model_out["trans_vectorfield"]
+                    rigid_pred = model_out["rigids"]
+                    psi_pred = model_out["psi"]
+
+                    # Generate divergence-free max noise with precomputed repulsion
+                    rigids_tensor = branch_feats["rigids_t"]
+                    t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
+
+                    rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
+                    rot_mats = rigid_obj.get_rots().get_rot_mats()
+                    trans_vecs = rigid_obj.get_trans()
+
+                    # Use synchronized repulsion for translation (repulsion acts on positions)
+                    trans_repulsion = repulsion_forces[branch_idx:branch_idx+1]  # [1, seq_len, 3] - add batch dim back
+                    
+                    # Generate divergence-free max noise with external repulsion
+                    rot_divfree_noise = self._divfree_max_noise_with_repulsion(
+                        rot_mats, t_batch, rot_vectorfield, None,  # No repulsion for rotations
+                        lambda_div, particle_repulsion_factor, noise_schedule_end_factor, min_t
+                    )
+                    trans_divfree_noise = self._divfree_max_noise_with_repulsion(
+                        trans_vecs, t_batch, trans_vectorfield, trans_repulsion,
+                        lambda_div, particle_repulsion_factor, noise_schedule_end_factor, min_t
+                    )
+
+                    # Add noise to vector fields
+                    rot_vectorfield = rot_vectorfield + rot_divfree_noise
+                    trans_vectorfield = trans_vectorfield + trans_divfree_noise
+
+                    # Apply reverse step
+                    fixed_mask = branch_feats["fixed_mask"] * branch_feats["res_mask"]
+                    flow_mask = (1 - branch_feats["fixed_mask"]) * branch_feats["res_mask"]
+
+                    rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                        rigid_t=ru.Rigid.from_tensor_7(branch_feats["rigids_t"]),
+                        rot_vectorfield=du.move_to_np(rot_vectorfield),
+                        trans_vectorfield=du.move_to_np(trans_vectorfield),
+                        flow_mask=du.move_to_np(flow_mask),
+                        t=t,
+                        dt=dt,
+                        center=True,
+                        noise_scale=1.0,
+                    )
+                    branch_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                    # Collect trajectory data for this branch
+                    all_trajectories[branch_idx]["rigids"].append(du.move_to_np(rigids_t.to_tensor_7()))
+                    atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                    all_trajectories[branch_idx]["bb_prots"].append(du.move_to_np(atom37_t))
+
+                    # Calculate x0 prediction
+                    gt_trans_0 = branch_feats["rigids_t"][..., 4:]
+                    pred_trans_0 = rigid_pred[..., 4:]
+                    trans_pred_0 = (
+                        flow_mask[..., None] * pred_trans_0
+                        + fixed_mask[..., None] * gt_trans_0
+                    )
+
+                    atom37_0 = all_atom.compute_backbone(
+                        ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                    )[0]
+                    all_trajectories[branch_idx]["bb_0_pred"].append(du.move_to_np(atom37_0))
+                    all_trajectories[branch_idx]["trans_0_pred"].append(du.move_to_np(trans_pred_0))
+                    final_psi_preds[branch_idx] = psi_pred
+
+                    # Update the branch features for next timestep
+                    all_branch_feats[branch_idx] = branch_feats
+
+        # Build completed samples for all branches
+        completed_samples = []
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        
+        for branch_idx in range(num_branches):
+            traj = all_trajectories[branch_idx]
+            
+            sample_result = {
+                "prot_traj": flip(traj["bb_prots"]),
+                "rigid_traj": flip(traj["rigids"]),
+                "trans_traj": flip(traj["trans_0_pred"]),
+                "psi_pred": final_psi_preds[branch_idx][None] if final_psi_preds[branch_idx] is not None else None,
+                "rigid_0_traj": flip(traj["bb_0_pred"]),
+            }
+            
+            # Use proven working batch dimension handling
+            sample_result = tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+            )
+            completed_samples.append(sample_result)
+
+        self._log.debug(f"    Completed synchronized simulation for {num_branches} branches")
+        return completed_samples
+
+    def _calculate_synchronized_repulsion(self, batch_positions, repulsion_strength):
+        """Calculate repulsion forces between all samples in the synchronized batch.
+        
+        Args:
+            batch_positions: [num_branches, seq_len, 3] - positions for all branches
+            repulsion_strength: Strength factor for repulsion
+            
+        Returns:
+            repulsion_forces: [num_branches, seq_len, 3] - repulsion forces for each branch
+        """
+        from runner.divergence_free_utils import calculate_euclidean_repulsion_forces
+        
+        # Flatten sequence dimension for repulsion calculation
+        # [num_branches, seq_len, 3] -> [num_branches, seq_len*3]
+        num_branches, seq_len, _ = batch_positions.shape
+        flattened_positions = batch_positions.view(num_branches, -1)
+        
+        # Calculate repulsion between branches (not residues)
+        repulsion_flat = calculate_euclidean_repulsion_forces(flattened_positions)
+        
+        # Reshape back to position space and scale
+        repulsion_forces = repulsion_flat.view(num_branches, seq_len, 3)
+        return repulsion_forces * repulsion_strength
+
+    def _divfree_max_noise_with_repulsion(self, x, t_batch, u_t, external_repulsion, 
+                                          lambda_div, repulsion_strength, noise_schedule_end_factor, min_t):
+        """Generate divergence-free max noise with optional external repulsion forces.
+        
+        This is a modified version of divfree_max_noise that can use precomputed repulsion forces
+        instead of calculating them from x (which would fail for batch_size=1).
+        """
+        from runner.divergence_free_utils import divfree_swirl_si, make_divergence_free
+        
+        # Calculate time-dependent noise scaling
+        t_scalar = t_batch[0].item()
+        normalized_time = (1.0 - t_scalar) / (1.0 - min_t)
+        noise_scale_factor = 1.0 + (noise_schedule_end_factor - 1.0) * normalized_time
+        
+        # Generate standard divergence-free noise
+        w_divfree = divfree_swirl_si(x, t_batch, None, u_t)
+        
+        if external_repulsion is not None:
+            # Use external repulsion (already computed between branches)
+            # Make it divergence-free
+            repulsion_divfree = make_divergence_free(external_repulsion, x, t_batch, u_t)
+            total_divfree_noise = w_divfree + repulsion_divfree
+        else:
+            # No repulsion (e.g., for rotations)
+            total_divfree_noise = w_divfree
+        
+        # Apply time-dependent scaling and lambda scaling
+        return lambda_div * noise_scale_factor * total_divfree_noise
+
+    def _extract_intermediate_state(self, completed_sample, target_t, reverse_steps):
+        """Extract intermediate state from a completed sample at a specific time."""
+        # Find the closest time step to target_t
+        target_step_idx = 0
+        for i, t in enumerate(reverse_steps):
+            if t <= target_t:
+                target_step_idx = i
+                break
+
+        # Extract the state at that time step from the trajectory
+        # Note: trajectory is flipped, so we need to reverse the index
+        trajectory_idx = len(reverse_steps) - 1 - target_step_idx
+
+        if trajectory_idx >= len(completed_sample["rigid_traj"]):
+            trajectory_idx = len(completed_sample["rigid_traj"]) - 1
+
+        # Create features from the trajectory state
+        rigids_t = torch.tensor(completed_sample["rigid_traj"][trajectory_idx]).to(self.sampler.device)
+        
+        # Add batch dimension if needed
+        if rigids_t.ndim == 2:
+            rigids_t = rigids_t[None]
+
+        # Create minimal features needed for continuation
+        intermediate_feats = {
+            "rigids_t": rigids_t,
+            "res_mask": torch.ones(rigids_t.shape[1]).to(self.sampler.device)[None],
+            "fixed_mask": torch.zeros(rigids_t.shape[1]).to(self.sampler.device)[None],
+        }
+
+        return intermediate_feats
+
+
+class NoiseSearchSDEInference(NoiseSearchInference):
+    """Noise search inference with SDE using multi-round refinement."""
+
+    def __init__(self, sampler, config):
+        super().__init__(sampler, config)
+        # Force noise_type to sde
+        self.config["noise_type"] = "sde"
+
+
+class NoiseSearchDivFreeInference(NoiseSearchInference):
+    """Noise search inference with divergence-free ODE using multi-round refinement."""
+
+    def __init__(self, sampler, config):
+        super().__init__(sampler, config)
+        # Force noise_type to divfree
+        self.config["noise_type"] = "divfree"
+
+
+class NoiseSearchDivFreeMaxInference(NoiseSearchInference):
+    """Noise search inference with divergence-free max using multi-round refinement."""
+
+    def __init__(self, sampler, config):
+        super().__init__(sampler, config)
+        # Force noise_type to divfree_max
+        self.config["noise_type"] = "divfree_max"
+
+
 class DivergenceFreeODEInference(InferenceMethod):
     """Divergence-free ODE path exploration inference."""
 
@@ -1289,6 +2183,187 @@ class DivergenceFreeODEInference(InferenceMethod):
                 "rigid_0_traj": prot_traj,
             }
 
+class DivergenceFreeMaxInference(InferenceMethod):
+    """Divergence-free max inference with linear noise schedule and particle repulsion."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using divergence-free max noise with linear schedule."""
+        lambda_div = self.config.get("lambda_div", 0.2)
+        noise_schedule_end_factor = self.config.get("noise_schedule_end_factor", 0.7)
+        particle_repulsion_factor = self.config.get("particle_repulsion_factor", 0.02)
+
+        self._log.info(
+            f"Running divergence-free max sampling with lambda_div={lambda_div}, "
+            f"noise_schedule_end_factor={noise_schedule_end_factor}, "
+            f"particle_repulsion_factor={particle_repulsion_factor}"
+        )
+
+        # Initialize features (same as standard method)
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        # Run divergence-free max sampling
+        sample_out = self._divergence_free_max_inference(
+            init_feats, lambda_div, noise_schedule_end_factor, particle_repulsion_factor, context
+        )
+
+        # Remove batch dimension like _base_sample does
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
+        )
+
+    def _divergence_free_max_inference(self, data_init, lambda_div, noise_schedule_end_factor, particle_repulsion_factor, context):
+        """Core divergence-free max logic with linear noise schedule and particle repulsion."""
+        sample_feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
+        )
+        device = sample_feats["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Initialize trajectory collection
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(reverse_steps):
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(sample_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                # Generate divergence-free max noise using the utility function
+                rigids_tensor = sample_feats["rigids_t"]
+                t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
+
+                # Extract rotation matrices and translations directly as torch tensors (stay on GPU)
+                rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
+                rot_mats = rigid_obj.get_rots().get_rot_mats()  # [B, N, 3, 3]
+                trans_vecs = rigid_obj.get_trans()  # [B, N, 3]
+
+                # Generate divergence-free max noise for rotation field
+                rot_divfree_noise = divfree_max_noise(
+                    rot_mats,  # x
+                    t_batch,   # t_batch
+                    rot_vectorfield,  # u_t
+                    lambda_div=lambda_div,
+                    repulsion_strength=particle_repulsion_factor,
+                    noise_schedule_end_factor=noise_schedule_end_factor,
+                    min_t=min_t
+                )
+
+                # Generate divergence-free max noise for translation field  
+                trans_divfree_noise = divfree_max_noise(
+                    trans_vecs,  # x
+                    t_batch,     # t_batch
+                    trans_vectorfield,  # u_t
+                    lambda_div=lambda_div,
+                    repulsion_strength=particle_repulsion_factor,
+                    noise_schedule_end_factor=noise_schedule_end_factor,
+                    min_t=min_t
+                )
+
+                # Add divergence-free max noise to vector fields
+                rot_vectorfield = rot_vectorfield + rot_divfree_noise
+                trans_vectorfield = trans_vectorfield + trans_divfree_noise
+
+                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
+                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                # Collect trajectory data
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Calculate x0 prediction derived from vectorfield predictions
+                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectory so that it starts from t=0
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        sample_result = {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
+
+        return sample_result
+
+
+
 
 class SDESimpleInference(InferenceMethod):
     """Simple SDE inference with noise but no branching."""
@@ -1564,6 +2639,176 @@ class DivergenceFreeSimpleInference(InferenceMethod):
         }
 
 
+class DivFreeMaxSimpleInference(InferenceMethod):
+    """Simple divergence-free max inference with noise but no branching."""
+
+    def sample(
+        self, sample_length: int, context: Optional[torch.Tensor] = None
+    ) -> Dict[str, Any]:
+        """Generate samples using simple divergence-free max (no path exploration)."""
+        lambda_div = self.config.get("lambda_div", 0.2)
+        particle_repulsion_factor = self.config.get("particle_repulsion_factor", 0.02)
+        noise_schedule_end_factor = self.config.get("noise_schedule_end_factor", 0.7)
+
+        self._log.info(f"Running Simple DivFree Max with lambda_div={lambda_div}, repulsion={particle_repulsion_factor}, end_factor={noise_schedule_end_factor}")
+
+        # Initialize features
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        # Run simple divergence-free max sampling
+        sample_out = self._base_sample_divfree_max(
+            init_feats, lambda_div, particle_repulsion_factor, noise_schedule_end_factor, context
+        )
+        return sample_out
+
+    def _base_sample_divfree_max(self, init_feats, lambda_div, particle_repulsion_factor, noise_schedule_end_factor, context=None):
+        """Simple divergence-free max sampling without path exploration."""
+        device = init_feats["rigids_t"].device
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Initialize trajectory collection
+        all_rigids = [du.move_to_np(copy.deepcopy(init_feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
+        sample_feats = init_feats.copy()
+
+        with torch.no_grad():
+            for step_idx, t in enumerate(reverse_steps):
+                # Apply divergence-free max step
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(sample_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                # Generate divergence-free max noise using the utility function
+                rigids_tensor = sample_feats["rigids_t"]
+                t_batch = torch.full((rigids_tensor.shape[0],), t, device=device)
+
+                # Extract rotation matrices and translations
+                rigid_obj = ru.Rigid.from_tensor_7(rigids_tensor)
+                rot_mats = rigid_obj.get_rots().get_rot_mats()
+                trans_vecs = rigid_obj.get_trans()
+
+                # Generate divergence-free max noise for rotation field
+                rot_divfree_noise = divfree_max_noise(
+                    rot_mats,
+                    t_batch,
+                    rot_vectorfield,
+                    lambda_div=lambda_div,
+                    repulsion_strength=particle_repulsion_factor,
+                    noise_schedule_end_factor=noise_schedule_end_factor,
+                    min_t=min_t
+                )
+
+                # Generate divergence-free max noise for translation field  
+                trans_divfree_noise = divfree_max_noise(
+                    trans_vecs,
+                    t_batch,
+                    trans_vectorfield,
+                    lambda_div=lambda_div,
+                    repulsion_strength=particle_repulsion_factor,
+                    noise_schedule_end_factor=noise_schedule_end_factor,
+                    min_t=min_t
+                )
+
+                # Add divergence-free max noise to vector fields
+                rot_vectorfield = rot_vectorfield + rot_divfree_noise
+                trans_vectorfield = trans_vectorfield + trans_divfree_noise
+
+                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
+                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+                
+                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                # Collect trajectory data
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Calculate x0 prediction
+                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectories to correct time order
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        sample_result = {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
+
+        return sample_result
+
+
 class RandomSearchDivFreeInference(DivergenceFreeODEInference):
     """Combined random search and divergence-free ODE branching method.
 
@@ -1630,11 +2875,11 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
             # Generate random initial features
             init_feats = self.generate_initial_features(sample_length)
 
-            # Sample to completion
-            sample_result = self.sampler._base_sample(sample_length, context)
+            # Sample to completion using the specific initial features
+            sample_result = self._sample_from_init_feats(init_feats, context)
             score = score_fn(sample_result, sample_length)
 
-            candidates.append({"init_feats": init_feats, "score": score})
+            candidates.append({"init_feats": init_feats, "score": score, "sample": sample_result})
             self._log.debug(f"    Score: {score:.4f}")
 
             # Track best intermediate sample
@@ -1648,18 +2893,109 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
         # Sort by score (descending)
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
-        # Keep only the best initial noise (num_keep = 1)
-        selected = candidates[:1]
+        # Keep top k candidates based on num_keep
+        num_keep = self.config.get("num_keep", 1)
+        selected = candidates[:num_keep]
 
         scores_str = [f"{c['score']:.4f}" for c in selected]
         self._log.info(
-            f"Selected {len(selected)} best initial noise with scores: {scores_str}"
+            f"Selected {len(selected)} best initial noises with scores: {scores_str}"
         )
 
         return (
             [c["init_feats"] for c in selected],
             best_intermediate_score,
             best_intermediate_sample,
+        )
+
+    def _sample_from_init_feats(self, init_feats, context):
+        """Sample to completion starting from specific initial features."""
+        # Use the standard method from the base class but with specific initial features
+        sample_feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), init_feats
+        )
+        device = sample_feats["rigids_t"].device
+
+        num_t = self.sampler._fm_conf.num_t
+        min_t = self.sampler._fm_conf.min_t
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = reverse_steps[0] - reverse_steps[1]
+
+        # Initialize trajectory collection
+        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
+        all_bb_prots = []
+        all_trans_0_pred = []
+        all_bb_0_pred = []
+        final_psi_pred = None
+
+        with torch.no_grad():
+            for t in reverse_steps:
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, t, torch.ones((1,)).to(device)
+                )
+                model_out = self.sampler.model(sample_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+                psi_pred = model_out["psi"]
+
+                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
+                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
+
+                # Standard ODE flow (no noise in random search phase)
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=1.0,
+                )
+
+                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+                # Collect trajectory data
+                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Calculate x0 prediction
+                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
+                pred_trans_0 = rigid_pred[..., 4:]
+                trans_pred_0 = (
+                    flow_mask[..., None] * pred_trans_0
+                    + fixed_mask[..., None] * gt_trans_0
+                )
+
+                atom37_0 = all_atom.compute_backbone(
+                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
+                )[0]
+                all_bb_0_pred.append(du.move_to_np(atom37_0))
+                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
+
+                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
+                all_bb_prots.append(du.move_to_np(atom37_t))
+                final_psi_pred = psi_pred
+
+        # Flip trajectory so that it starts from t=0
+        flip = lambda x: np.flip(np.stack(x), (0,))
+        all_bb_prots = flip(all_bb_prots)
+        all_rigids = flip(all_rigids)
+        all_trans_0_pred = flip(all_trans_0_pred)
+        all_bb_0_pred = flip(all_bb_0_pred)
+
+        sample_result = {
+            "prot_traj": all_bb_prots,
+            "rigid_traj": all_rigids,
+            "trans_traj": all_trans_0_pred,
+            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
+            "rigid_0_traj": all_bb_0_pred,
+        }
+
+        # Remove batch dimension
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
         )
 
     def generate_initial_features(self, sample_length):
@@ -1753,8 +3089,13 @@ def get_inference_method(
         "best_of_n": BestOfNInference,
         "sde_path_exploration": SDEPathExplorationInference,
         "divergence_free_ode": DivergenceFreeODEInference,
+        "divergence_free_max": DivergenceFreeMaxInference,
+        "noise_search_sde": NoiseSearchSDEInference,
+        "noise_search_divfree": NoiseSearchDivFreeInference,
+        "noise_search_divfree_max": NoiseSearchDivFreeMaxInference,
         "sde_simple": SDESimpleInference,
         "divergence_free_simple": DivergenceFreeSimpleInference,
+        "divfree_max_simple": DivFreeMaxSimpleInference,
         "random_search_divfree": RandomSearchDivFreeInference,
     }
 
