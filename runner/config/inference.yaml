@@ -82,7 +82,7 @@ inference:
       noise_scale: 0.05  # Scale of noise for SDE
       
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
-      lambda_div: 0.2
+      lambda_div: 0.3
       particle_repulsion_factor: 0.02
       noise_schedule_end_factor: 0.7
       
