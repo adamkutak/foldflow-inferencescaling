@@ -1345,12 +1345,21 @@ class NoiseSearchInference(InferenceMethod):
                 lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
             )
             processed_result["feature_states_traj"] = feature_states
+
+            # Debug: Log shapes after processing
+            self._log.info(
+                f"    DEBUG: After batch removal, prot_traj shape: {processed_result['prot_traj'].shape}"
+            )
             return processed_result
         else:
             # Standard batch dimension removal
-            return tree.map_structure(
+            result = tree.map_structure(
                 lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
             )
+            self._log.info(
+                f"    DEBUG: Standard batch removal, prot_traj shape: {result['prot_traj'].shape}"
+            )
+            return result
 
     def _noise_search_divfree_unified(
         self,
@@ -3455,12 +3464,21 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
                 lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
             )
             processed_result["feature_states_traj"] = feature_states
+
+            # Debug: Log shapes after processing
+            self._log.info(
+                f"    DEBUG: After batch removal, prot_traj shape: {processed_result['prot_traj'].shape}"
+            )
             return processed_result
         else:
             # Standard batch dimension removal
-            return tree.map_structure(
+            result = tree.map_structure(
                 lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
             )
+            self._log.info(
+                f"    DEBUG: Standard batch removal, prot_traj shape: {result['prot_traj'].shape}"
+            )
+            return result
 
     def generate_initial_features(self, sample_length):
         """Generate initial features for a sample."""
