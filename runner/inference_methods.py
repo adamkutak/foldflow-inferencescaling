@@ -48,8 +48,8 @@ class InferenceMethod(ABC):
             return self._rmsd_function
         elif selector == "geometric":
             return self._geometric_score_function
-        elif selector == "tm_score_3seq":
-            return self._tm_score_3seq_function
+        elif selector == "tm_score_4seq":
+            return self._tm_score_4seq_function
         elif selector == "dual_score":
             return self._dual_score_function
         else:
@@ -61,7 +61,7 @@ class InferenceMethod(ABC):
             "tm_score": self._tm_score_function,
             "rmsd": self._rmsd_function,
             "geometric": self._geometric_score_function,
-            "tm_score_3seq": self._tm_score_3seq_function,
+            "tm_score_4seq": self._tm_score_4seq_function,
         }
 
     def _tm_score_function(
@@ -247,19 +247,19 @@ class InferenceMethod(ABC):
                 except:
                     pass
 
-    def _tm_score_3seq_function(
+    def _tm_score_4seq_function(
         self, sample_output: Dict[str, Any], sample_length: int
     ) -> float:
-        """Evaluate sample using TM-score with only 3 sequence refolds instead of 8.
+        """Evaluate sample using TM-score with only 4 sequence refolds instead of 8.
 
         This is faster than the full self-consistency while maintaining most accuracy.
         """
         self._log.debug(
-            f"        _tm_score_3seq_function: Starting evaluation with 3 sequences"
+            f"        _tm_score_4seq_function: Starting evaluation with 4 sequences"
         )
 
         # Create temporary directory for evaluation
-        temp_dir = os.path.join(self.sampler._output_dir, "temp_eval_3seq")
+        temp_dir = os.path.join(self.sampler._output_dir, "temp_eval_4seq")
         os.makedirs(temp_dir, exist_ok=True)
 
         try:
@@ -278,9 +278,9 @@ class InferenceMethod(ABC):
                 pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
             )
 
-            # Temporarily modify seq_per_sample to 3
+            # Temporarily modify seq_per_sample to 4
             original_seq_per_sample = self.sampler._sample_conf.seq_per_sample
-            self.sampler._sample_conf.seq_per_sample = 3
+            self.sampler._sample_conf.seq_per_sample = 4
 
             try:
                 sc_results = self.sampler.run_self_consistency(
@@ -288,7 +288,7 @@ class InferenceMethod(ABC):
                 )
                 tm_score = sc_results["tm_score"].mean()
                 self._log.debug(
-                    f"        _tm_score_3seq_function: TM-score = {tm_score:.4f} (3 sequences)"
+                    f"        _tm_score_4seq_function: TM-score = {tm_score:.4f} (4 sequences)"
                 )
                 return tm_score
             finally:
@@ -297,7 +297,7 @@ class InferenceMethod(ABC):
 
         except Exception as e:
             self._log.error(
-                f"        _tm_score_3seq_function: Error during evaluation: {e}"
+                f"        _tm_score_4seq_function: Error during evaluation: {e}"
             )
             return float("-inf")
         finally:
