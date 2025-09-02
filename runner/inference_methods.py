@@ -985,17 +985,6 @@ class NoiseSearchInference(InferenceMethod):
                 f"ROUND {round_idx + 1}/{num_rounds}: Starting from t={start_t:.4f}"
             )
 
-            # Calculate expected steps for this round
-            expected_start_step_idx = 0
-            for i, t in enumerate(reverse_steps):
-                if t <= start_t:
-                    expected_start_step_idx = i
-                    break
-            expected_steps = len(reverse_steps[expected_start_step_idx:])
-            self._log.info(
-                f"  Expected simulation steps: {expected_steps} (from step {expected_start_step_idx})"
-            )
-
             round_samples = []
             round_scores = []
 
@@ -1006,10 +995,6 @@ class NoiseSearchInference(InferenceMethod):
 
                 # Generate multiple samples from this candidate
                 for branch_idx in range(num_branches):
-                    import time
-
-                    branch_start_time = time.time()
-
                     # Create a copy of the candidate features
                     branch_feats = tree.map_structure(
                         lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
@@ -1017,26 +1002,12 @@ class NoiseSearchInference(InferenceMethod):
                     )
 
                     # Run SDE sampling from start_t to min_t
-                    sim_start_time = time.time()
                     completed_sample = self._sde_simulate_from_time(
                         branch_feats, start_t, dt, reverse_steps, noise_scale, context
                     )
-                    sim_end_time = time.time()
 
                     # Evaluate the completed sample
-                    eval_start_time = time.time()
                     score = score_fn(completed_sample, sample_length)
-                    eval_end_time = time.time()
-
-                    branch_end_time = time.time()
-
-                    # Log timing breakdown
-                    sim_time = sim_end_time - sim_start_time
-                    eval_time = eval_end_time - eval_start_time
-                    total_time = branch_end_time - branch_start_time
-                    self._log.info(
-                        f"    Branch {branch_idx}: sim={sim_time:.1f}s, eval={eval_time:.1f}s, total={total_time:.1f}s"
-                    )
                     round_samples.append(completed_sample)
                     round_scores.append(score)
 
@@ -1101,14 +1072,12 @@ class NoiseSearchInference(InferenceMethod):
 
         # Debug: Log timestep information
         self._log.info(
-            f"    SIM DEBUG: start_t={start_t:.4f}, found start_step_idx={start_step_idx}"
+            f"    DEBUG: start_t={start_t:.4f}, found start_step_idx={start_step_idx}"
         )
-        self._log.info(
-            f"    SIM DEBUG: simulation_steps length={len(simulation_steps)}"
-        )
+        self._log.info(f"    DEBUG: simulation_steps length={len(simulation_steps)}")
         if len(simulation_steps) > 0:
             self._log.info(
-                f"    SIM DEBUG: simulation range: {simulation_steps[0]:.4f} -> {simulation_steps[-1]:.4f}"
+                f"    DEBUG: simulation range: {simulation_steps[0]:.4f} -> {simulation_steps[-1]:.4f}"
             )
 
         # Initialize trajectory collection
@@ -1123,28 +1092,13 @@ class NoiseSearchInference(InferenceMethod):
 
         sample_feats = init_feats.copy()
 
-        # Initialize timing trackers
-        import time
-
-        total_model_time = 0.0
-        total_flow_time = 0.0
-        total_trajectory_time = 0.0
-        total_feature_storage_time = 0.0
-
         with torch.no_grad():
             for step_idx, t in enumerate(simulation_steps):
-                step_start_time = time.time()
-
                 # Apply SDE step with noise
                 sample_feats = self.sampler.exp._set_t_feats(
                     sample_feats, t, torch.ones((1,)).to(device)
                 )
-
-                # Time model forward pass
-                model_start_time = time.time()
                 model_out = self.sampler.model(sample_feats)
-                model_end_time = time.time()
-                total_model_time += model_end_time - model_start_time
 
                 rot_vectorfield = model_out["rot_vectorfield"]
                 trans_vectorfield = model_out["trans_vectorfield"]
@@ -1165,8 +1119,6 @@ class NoiseSearchInference(InferenceMethod):
                 fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
                 flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
 
-                # Time flow matching step
-                flow_start_time = time.time()
                 rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
                     rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
                     rot_vectorfield=du.move_to_np(rot_vectorfield),
@@ -1177,20 +1129,14 @@ class NoiseSearchInference(InferenceMethod):
                     center=True,
                     noise_scale=1.0,
                 )
-                flow_end_time = time.time()
-                total_flow_time += flow_end_time - flow_start_time
 
                 sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-
-                # Time trajectory collection
-                traj_start_time = time.time()
 
                 # Collect trajectory data
                 all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
 
                 # Store complete feature state for proper intermediate state extraction
                 # Deep copy to ensure independence between timesteps
-                feature_storage_start_time = time.time()
                 feature_state_copy = {}
                 for key, value in sample_feats.items():
                     if torch.is_tensor(value):
@@ -1200,10 +1146,6 @@ class NoiseSearchInference(InferenceMethod):
                             value.copy() if hasattr(value, "copy") else value
                         )
                 all_feature_states.append(feature_state_copy)
-                feature_storage_end_time = time.time()
-                total_feature_storage_time += (
-                    feature_storage_end_time - feature_storage_start_time
-                )
 
                 # Calculate x0 prediction
                 gt_trans_0 = sample_feats["rigids_t"][..., 4:]
@@ -1222,26 +1164,6 @@ class NoiseSearchInference(InferenceMethod):
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
-
-                traj_end_time = time.time()
-                total_trajectory_time += traj_end_time - traj_start_time
-
-        # Log timing breakdown for SDE simulation
-        actual_steps = len(all_rigids)
-        self._log.info(f"    SIM TIMING: COMPLETED {actual_steps} steps")
-        self._log.info(
-            f"    SIM TIMING: model={total_model_time:.2f}s, flow={total_flow_time:.2f}s"
-        )
-        self._log.info(
-            f"    SIM TIMING: traj={total_trajectory_time:.2f}s, features={total_feature_storage_time:.2f}s"
-        )
-        total_sim_time = (
-            total_model_time
-            + total_flow_time
-            + total_trajectory_time
-            + total_feature_storage_time
-        )
-        self._log.info(f"    SIM TIMING: TOTAL={total_sim_time:.2f}s")
 
         # Flip trajectory so that it starts from t=0
         flip = lambda x: np.flip(np.stack(x), (0,))
@@ -2687,26 +2609,6 @@ class DivergenceFreeMaxInference(InferenceMethod):
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
 
-                traj_end_time = time.time()
-                total_trajectory_time += traj_end_time - traj_start_time
-
-        # Log timing breakdown for SDE simulation
-        actual_steps = len(all_rigids)
-        self._log.info(f"    SIM TIMING: COMPLETED {actual_steps} steps")
-        self._log.info(
-            f"    SIM TIMING: model={total_model_time:.2f}s, flow={total_flow_time:.2f}s"
-        )
-        self._log.info(
-            f"    SIM TIMING: traj={total_trajectory_time:.2f}s, features={total_feature_storage_time:.2f}s"
-        )
-        total_sim_time = (
-            total_model_time
-            + total_flow_time
-            + total_trajectory_time
-            + total_feature_storage_time
-        )
-        self._log.info(f"    SIM TIMING: TOTAL={total_sim_time:.2f}s")
-
         # Flip trajectory so that it starts from t=0
         flip = lambda x: np.flip(np.stack(x), (0,))
         all_bb_prots = flip(all_bb_prots)
@@ -2846,26 +2748,6 @@ class SDESimpleInference(InferenceMethod):
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
-
-                traj_end_time = time.time()
-                total_trajectory_time += traj_end_time - traj_start_time
-
-        # Log timing breakdown for SDE simulation
-        actual_steps = len(all_rigids)
-        self._log.info(f"    SIM TIMING: COMPLETED {actual_steps} steps")
-        self._log.info(
-            f"    SIM TIMING: model={total_model_time:.2f}s, flow={total_flow_time:.2f}s"
-        )
-        self._log.info(
-            f"    SIM TIMING: traj={total_trajectory_time:.2f}s, features={total_feature_storage_time:.2f}s"
-        )
-        total_sim_time = (
-            total_model_time
-            + total_flow_time
-            + total_trajectory_time
-            + total_feature_storage_time
-        )
-        self._log.info(f"    SIM TIMING: TOTAL={total_sim_time:.2f}s")
 
         # Flip trajectory so that it starts from t=0
         flip = lambda x: np.flip(np.stack(x), (0,))
@@ -3008,26 +2890,6 @@ class DivergenceFreeSimpleInference(InferenceMethod):
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
-
-                traj_end_time = time.time()
-                total_trajectory_time += traj_end_time - traj_start_time
-
-        # Log timing breakdown for SDE simulation
-        actual_steps = len(all_rigids)
-        self._log.info(f"    SIM TIMING: COMPLETED {actual_steps} steps")
-        self._log.info(
-            f"    SIM TIMING: model={total_model_time:.2f}s, flow={total_flow_time:.2f}s"
-        )
-        self._log.info(
-            f"    SIM TIMING: traj={total_trajectory_time:.2f}s, features={total_feature_storage_time:.2f}s"
-        )
-        total_sim_time = (
-            total_model_time
-            + total_flow_time
-            + total_trajectory_time
-            + total_feature_storage_time
-        )
-        self._log.info(f"    SIM TIMING: TOTAL={total_sim_time:.2f}s")
 
         # Flip trajectory so that it starts from t=0
         flip = lambda x: np.flip(np.stack(x), (0,))
@@ -3408,26 +3270,6 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
-
-                traj_end_time = time.time()
-                total_trajectory_time += traj_end_time - traj_start_time
-
-        # Log timing breakdown for SDE simulation
-        actual_steps = len(all_rigids)
-        self._log.info(f"    SIM TIMING: COMPLETED {actual_steps} steps")
-        self._log.info(
-            f"    SIM TIMING: model={total_model_time:.2f}s, flow={total_flow_time:.2f}s"
-        )
-        self._log.info(
-            f"    SIM TIMING: traj={total_trajectory_time:.2f}s, features={total_feature_storage_time:.2f}s"
-        )
-        total_sim_time = (
-            total_model_time
-            + total_flow_time
-            + total_trajectory_time
-            + total_feature_storage_time
-        )
-        self._log.info(f"    SIM TIMING: TOTAL={total_sim_time:.2f}s")
 
         # Flip trajectory so that it starts from t=0
         flip = lambda x: np.flip(np.stack(x), (0,))
