@@ -64,6 +64,20 @@ class InferenceMethod(ABC):
             "tm_score_4seq": self._tm_score_4seq_function,
         }
 
+    def _calculate_and_log_self_consistency(
+        self, sample_output: Dict[str, Any], sample_length: int, method_name: str
+    ) -> float:
+        """Calculate and log self-consistency score for simple inference methods."""
+        try:
+            tm_score = self._tm_score_function(sample_output, sample_length)
+            self._log.info(f"{method_name} self-consistency TM-score: {tm_score:.4f}")
+            return tm_score
+        except Exception as e:
+            self._log.warning(
+                f"Failed to calculate self-consistency score for {method_name}: {e}"
+            )
+            return float("-inf")
+
     def _tm_score_function(
         self, sample_output: Dict[str, Any], sample_length: int
     ) -> float:
@@ -2884,9 +2898,16 @@ class SDESimpleInference(InferenceMethod):
         sample_out = self._simple_sde_inference(init_feats, noise_scale, context)
 
         # Remove batch dimension like _base_sample does
-        return tree.map_structure(
+        sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
+
+        # Calculate and log self-consistency score
+        self._calculate_and_log_self_consistency(
+            sample_result, sample_length, "SDE Simple"
+        )
+
+        return sample_result
 
     def _simple_sde_inference(self, data_init, noise_scale, context):
         """Simple SDE sampling with noise at every step."""
@@ -3026,9 +3047,16 @@ class DivergenceFreeSimpleInference(InferenceMethod):
         )
 
         # Remove batch dimension like _base_sample does
-        return tree.map_structure(
+        sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
+
+        # Calculate and log self-consistency score
+        self._calculate_and_log_self_consistency(
+            sample_result, sample_length, "DivergenceFree Simple"
+        )
+
+        return sample_result
 
     def _simple_divergence_free_inference(self, data_init, lambda_div, context):
         """Simple divergence-free sampling with noise at every step."""
@@ -3174,9 +3202,16 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         )
 
         # Remove batch dimension like _base_sample does
-        return tree.map_structure(
+        sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
+
+        # Calculate and log self-consistency score
+        self._calculate_and_log_self_consistency(
+            sample_result, sample_length, "DivFreeMax Simple"
+        )
+
+        return sample_result
 
     def _base_sample_divfree_max(
         self,
