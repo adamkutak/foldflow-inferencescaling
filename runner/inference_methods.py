@@ -286,6 +286,9 @@ class InferenceMethod(ABC):
             "trans_traj": all_trans_0_pred,
             "psi_pred": (final_psi_pred[None] if final_psi_pred is not None else None),
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states[
+                ::-1
+            ],  # Complete feature states for proper intermediate extraction
         }
 
         # Remove batch dimension like _base_sample does
@@ -1072,6 +1075,9 @@ class NoiseSearchInference(InferenceMethod):
         all_bb_prots = []
         all_trans_0_pred = []
         all_bb_0_pred = []
+        all_feature_states = (
+            []
+        )  # Store complete feature states for proper intermediate state extraction
         final_psi_pred = None
 
         sample_feats = init_feats.copy()
@@ -1119,6 +1125,18 @@ class NoiseSearchInference(InferenceMethod):
                 # Collect trajectory data
                 all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
 
+                # Store complete feature state for proper intermediate state extraction
+                # Deep copy to ensure independence between timesteps
+                feature_state_copy = {}
+                for key, value in sample_feats.items():
+                    if torch.is_tensor(value):
+                        feature_state_copy[key] = value.clone().detach()
+                    else:
+                        feature_state_copy[key] = (
+                            value.copy() if hasattr(value, "copy") else value
+                        )
+                all_feature_states.append(feature_state_copy)
+
                 # Calculate x0 prediction
                 gt_trans_0 = sample_feats["rigids_t"][..., 4:]
                 pred_trans_0 = rigid_pred[..., 4:]
@@ -1150,6 +1168,9 @@ class NoiseSearchInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states[
+                ::-1
+            ],  # Complete feature states for proper intermediate extraction
         }
 
         # Remove batch dimension
@@ -1357,6 +1378,9 @@ class NoiseSearchInference(InferenceMethod):
         all_bb_prots = []
         all_trans_0_pred = []
         all_bb_0_pred = []
+        all_feature_states = (
+            []
+        )  # Store complete feature states for proper intermediate state extraction
         final_psi_pred = None
 
         sample_feats = init_feats.copy()
@@ -1441,6 +1465,19 @@ class NoiseSearchInference(InferenceMethod):
 
                 # Collect trajectory data using proven working approach
                 all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+
+                # Store complete feature state for proper intermediate state extraction
+                # Deep copy to ensure independence between timesteps
+                feature_state_copy = {}
+                for key, value in sample_feats.items():
+                    if torch.is_tensor(value):
+                        feature_state_copy[key] = value.clone().detach()
+                    else:
+                        feature_state_copy[key] = (
+                            value.copy() if hasattr(value, "copy") else value
+                        )
+                all_feature_states.append(feature_state_copy)
+
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
 
                 # Calculate x0 prediction
@@ -1466,12 +1503,16 @@ class NoiseSearchInference(InferenceMethod):
         all_trans_0_pred = flip(all_trans_0_pred)
         all_bb_0_pred = flip(all_bb_0_pred)
 
+        # Flip feature states trajectory - need to reverse the list, not stack since these are dicts
+        all_feature_states = all_feature_states[::-1]
+
         sample_result = {
             "prot_traj": all_bb_prots,
             "rigid_traj": all_rigids,
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states,  # Complete feature states for proper intermediate extraction
         }
 
         # Use proven working batch dimension handling from original divfree code
@@ -1759,26 +1800,53 @@ class NoiseSearchInference(InferenceMethod):
         # Note: trajectory is flipped, so we need to reverse the index
         trajectory_idx = len(reverse_steps) - 1 - target_step_idx
 
-        if trajectory_idx >= len(completed_sample["rigid_traj"]):
-            trajectory_idx = len(completed_sample["rigid_traj"]) - 1
+        # Check if we have complete feature states trajectory (new approach)
+        if (
+            "feature_states_traj" in completed_sample
+            and completed_sample["feature_states_traj"] is not None
+        ):
+            # Use the stored complete feature states - this preserves all original features!
+            if trajectory_idx >= len(completed_sample["feature_states_traj"]):
+                trajectory_idx = len(completed_sample["feature_states_traj"]) - 1
 
-        # Create features from the trajectory state
-        rigids_t = torch.tensor(completed_sample["rigid_traj"][trajectory_idx]).to(
-            self.sampler.device
-        )
+            # Get the complete feature state at this timestep
+            intermediate_feats = completed_sample["feature_states_traj"][trajectory_idx]
 
-        # Add batch dimension if needed
-        if rigids_t.ndim == 2:
-            rigids_t = rigids_t[None]
+            # Ensure tensors are on correct device and cloned for independence
+            device_feats = {}
+            for key, value in intermediate_feats.items():
+                if torch.is_tensor(value):
+                    device_feats[key] = value.clone().to(self.sampler.device)
+                else:
+                    device_feats[key] = (
+                        value.copy() if hasattr(value, "copy") else value
+                    )
 
-        # Create minimal features needed for continuation
-        intermediate_feats = {
-            "rigids_t": rigids_t,
-            "res_mask": torch.ones(rigids_t.shape[1]).to(self.sampler.device)[None],
-            "fixed_mask": torch.zeros(rigids_t.shape[1]).to(self.sampler.device)[None],
-        }
+            return device_feats
+        else:
+            # Fallback to old approach (for compatibility with existing samples)
+            if trajectory_idx >= len(completed_sample["rigid_traj"]):
+                trajectory_idx = len(completed_sample["rigid_traj"]) - 1
 
-        return intermediate_feats
+            # Create features from the trajectory state
+            rigids_t = torch.tensor(completed_sample["rigid_traj"][trajectory_idx]).to(
+                self.sampler.device
+            )
+
+            # Add batch dimension if needed
+            if rigids_t.ndim == 2:
+                rigids_t = rigids_t[None]
+
+            # Create minimal features needed for continuation
+            intermediate_feats = {
+                "rigids_t": rigids_t,
+                "res_mask": torch.ones(rigids_t.shape[1]).to(self.sampler.device)[None],
+                "fixed_mask": torch.zeros(rigids_t.shape[1]).to(self.sampler.device)[
+                    None
+                ],
+            }
+
+            return intermediate_feats
 
 
 class NoiseSearchSDEInference(NoiseSearchInference):
@@ -2528,6 +2596,9 @@ class DivergenceFreeMaxInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states[
+                ::-1
+            ],  # Complete feature states for proper intermediate extraction
         }
 
         return sample_result
@@ -2665,6 +2736,9 @@ class SDESimpleInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states[
+                ::-1
+            ],  # Complete feature states for proper intermediate extraction
         }
 
 
@@ -2804,6 +2878,9 @@ class DivergenceFreeSimpleInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states[
+                ::-1
+            ],  # Complete feature states for proper intermediate extraction
         }
 
 
@@ -2989,6 +3066,9 @@ class DivFreeMaxSimpleInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states[
+                ::-1
+            ],  # Complete feature states for proper intermediate extraction
         }
 
         return sample_result
@@ -3178,6 +3258,9 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
+            "feature_states_traj": all_feature_states[
+                ::-1
+            ],  # Complete feature states for proper intermediate extraction
         }
 
         # Remove batch dimension
