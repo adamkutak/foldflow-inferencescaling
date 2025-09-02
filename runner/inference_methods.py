@@ -46,6 +46,10 @@ class InferenceMethod(ABC):
             return self._tm_score_function
         elif selector == "rmsd":
             return self._rmsd_function
+        elif selector == "geometric":
+            return self._geometric_score_function
+        elif selector == "tm_score_3seq":
+            return self._tm_score_3seq_function
         elif selector == "dual_score":
             return self._dual_score_function
         else:
@@ -53,7 +57,12 @@ class InferenceMethod(ABC):
 
     def get_score_functions(self) -> Dict[str, Callable]:
         """Get all scoring functions for comprehensive evaluation."""
-        return {"tm_score": self._tm_score_function, "rmsd": self._rmsd_function}
+        return {
+            "tm_score": self._tm_score_function,
+            "rmsd": self._rmsd_function,
+            "geometric": self._geometric_score_function,
+            "tm_score_3seq": self._tm_score_3seq_function,
+        }
 
     def _tm_score_function(
         self, sample_output: Dict[str, Any], sample_length: int
@@ -148,6 +157,151 @@ class InferenceMethod(ABC):
             return -sc_results["rmsd"].mean()  # Negative because lower RMSD is better
 
         finally:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+    def _geometric_score_function(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> float:
+        """Evaluate sample using fast geometric validation metrics only.
+
+        This scorer analyzes the generated backbone structure directly without
+        any sequence design or refolding steps, making it very fast.
+
+        Returns a composite score where higher values indicate better geometry.
+        """
+        from tools.analysis import metrics
+        import tempfile
+
+        self._log.debug(f"        _geometric_score_function: Starting fast evaluation")
+
+        try:
+            # Create temporary file for PDB
+            with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as tmp_pdb:
+                tmp_pdb_path = tmp_pdb.name
+
+            # Save the backbone structure to PDB
+            traj_paths = self.sampler.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=os.path.dirname(tmp_pdb_path),
+            )
+            pdb_path = traj_paths["sample_path"]
+
+            # Extract backbone coordinates for geometric analysis
+            final_coords = sample_output["prot_traj"][-1]  # Final structure
+            ca_pos = final_coords[:sample_length, 1, :]  # C-alpha coordinates
+
+            # Calculate geometric metrics
+            ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
+            num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
+                ca_pos
+            )
+
+            # Secondary structure analysis
+            try:
+                ss_metrics = metrics.calc_mdtraj_metrics(pdb_path)
+                non_coil_percent = ss_metrics["non_coil_percent"]
+                rg = ss_metrics["radius_of_gyration"]
+            except Exception as e:
+                self._log.warning(
+                    f"        _geometric_score_function: Secondary structure analysis failed: {e}"
+                )
+                non_coil_percent = 0.0
+                rg = np.linalg.norm(ca_pos.std(axis=0))  # Fallback RG calculation
+
+            # Composite score calculation (higher is better)
+            # Penalize bad geometry, reward good secondary structure
+            score = (
+                ca_ca_valid_percent * 2.0  # Reward valid C-alpha distances (0-2)
+                + (1.0 - ca_steric_clash_percent) * 1.5  # Penalize clashes (0-1.5)
+                + non_coil_percent * 1.0  # Reward secondary structure (0-1)
+                + max(0, 1.0 - ca_ca_bond_dev) * 0.5  # Penalize bond deviations (0-0.5)
+            )
+
+            self._log.debug(
+                f"        _geometric_score_function: Geometric score = {score:.4f}"
+            )
+            self._log.debug(
+                f"          ca_valid_percent={ca_ca_valid_percent:.3f}, clash_percent={ca_steric_clash_percent:.3f}"
+            )
+            self._log.debug(
+                f"          non_coil_percent={non_coil_percent:.3f}, bond_dev={ca_ca_bond_dev:.3f}"
+            )
+
+            return score
+
+        except Exception as e:
+            self._log.error(
+                f"        _geometric_score_function: Error during evaluation: {e}"
+            )
+            return float("-inf")
+        finally:
+            # Clean up temporary files
+            if "tmp_pdb_path" in locals() and os.path.exists(tmp_pdb_path):
+                os.unlink(tmp_pdb_path)
+            if "pdb_path" in locals() and os.path.exists(pdb_path):
+                try:
+                    os.unlink(pdb_path)
+                except:
+                    pass
+
+    def _tm_score_3seq_function(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> float:
+        """Evaluate sample using TM-score with only 3 sequence refolds instead of 8.
+
+        This is faster than the full self-consistency while maintaining most accuracy.
+        """
+        self._log.debug(
+            f"        _tm_score_3seq_function: Starting evaluation with 3 sequences"
+        )
+
+        # Create temporary directory for evaluation
+        temp_dir = os.path.join(self.sampler._output_dir, "temp_eval_3seq")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        try:
+            # Save trajectory
+            traj_paths = self.sampler.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=temp_dir,
+            )
+
+            pdb_path = traj_paths["sample_path"]
+            sc_output_dir = os.path.join(temp_dir, "self_consistency")
+            os.makedirs(sc_output_dir, exist_ok=True)
+            shutil.copy(
+                pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
+            )
+
+            # Temporarily modify seq_per_sample to 3
+            original_seq_per_sample = self.sampler._sample_conf.seq_per_sample
+            self.sampler._sample_conf.seq_per_sample = 3
+
+            try:
+                sc_results = self.sampler.run_self_consistency(
+                    sc_output_dir, pdb_path, motif_mask=None
+                )
+                tm_score = sc_results["tm_score"].mean()
+                self._log.debug(
+                    f"        _tm_score_3seq_function: TM-score = {tm_score:.4f} (3 sequences)"
+                )
+                return tm_score
+            finally:
+                # Restore original seq_per_sample
+                self.sampler._sample_conf.seq_per_sample = original_seq_per_sample
+
+        except Exception as e:
+            self._log.error(
+                f"        _tm_score_3seq_function: Error during evaluation: {e}"
+            )
+            return float("-inf")
+        finally:
+            # Clean up temporary directory
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
 
