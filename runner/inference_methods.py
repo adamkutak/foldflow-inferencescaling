@@ -1219,16 +1219,6 @@ class NoiseSearchInference(InferenceMethod):
         # Get the steps from start_t to min_t
         simulation_steps = reverse_steps[start_step_idx:]
 
-        # Debug: Log timestep information
-        self._log.info(
-            f"    DEBUG: start_t={start_t:.4f}, found start_step_idx={start_step_idx}"
-        )
-        self._log.info(f"    DEBUG: simulation_steps length={len(simulation_steps)}")
-        if len(simulation_steps) > 0:
-            self._log.info(
-                f"    DEBUG: simulation range: {simulation_steps[0]:.4f} -> {simulation_steps[-1]:.4f}"
-            )
-
         # Initialize trajectory collection
         all_rigids = []
         all_bb_prots = []
@@ -1341,18 +1331,11 @@ class NoiseSearchInference(InferenceMethod):
             )
             processed_result["feature_states_traj"] = feature_states
 
-            # Debug: Log shapes after processing
-            self._log.info(
-                f"    DEBUG: After batch removal, prot_traj shape: {processed_result['prot_traj'].shape}"
-            )
             return processed_result
         else:
             # Standard batch dimension removal
             result = tree.map_structure(
                 lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
-            )
-            self._log.info(
-                f"    DEBUG: Standard batch removal, prot_traj shape: {result['prot_traj'].shape}"
             )
             return result
 
@@ -3460,18 +3443,11 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
             )
             processed_result["feature_states_traj"] = feature_states
 
-            # Debug: Log shapes after processing
-            self._log.info(
-                f"    DEBUG: After batch removal, prot_traj shape: {processed_result['prot_traj'].shape}"
-            )
             return processed_result
         else:
             # Standard batch dimension removal
             result = tree.map_structure(
                 lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
-            )
-            self._log.info(
-                f"    DEBUG: Standard batch removal, prot_traj shape: {result['prot_traj'].shape}"
             )
             return result
 
