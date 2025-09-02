@@ -1078,14 +1078,9 @@ class NoiseSearchInference(InferenceMethod):
 
         # Extract the actual sample from the result dict and remove batch dimension
         if isinstance(sample_out, dict) and "sample" in sample_out:
-            raw_sample = sample_out["sample"]
+            return sample_out  # Return the full dict with sample, score, method
         else:
-            raw_sample = sample_out
-
-        # Remove batch dimension like _base_sample does
-        return tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, raw_sample
-        )
+            return sample_out
 
     def _noise_search_sde(
         self,
