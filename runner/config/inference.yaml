@@ -63,7 +63,7 @@ inference:
     # "random_search_divfree": RandomSearchDivFreeInference,
 
     # Inference method configuration
-    inference_method: "noise_search_divfree_max"
+    inference_method: "noise_search_sde"
     
     # Method-specific configuration
     method_config:
@@ -73,16 +73,16 @@ inference:
       # noise_schedule_end_factor: 0.7  # Linear noise decrease factor (1.0 -> 0.7 by end)
       
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
-      num_branches: 4  # Number of branches per round
-      num_keep: 1  # Number of top samples to keep each round
-      lambda_div: 0.2
-      particle_repulsion_factor: 0.02
-      noise_schedule_end_factor: 0.7
+      # num_branches: 4  # Number of branches per round
+      # num_keep: 1  # Number of top samples to keep each round
+      # lambda_div: 0.2
+      # particle_repulsion_factor: 0.02
+      # noise_schedule_end_factor: 0.7
       
       # SDE Path Exploration configuration (when using sde_path_exploration)
-      # num_branches: 4  # Number of branches per step
-      # num_keep: 2  # Number of branches to keep
-      # noise_scale: 0.05  # Scale of noise for SDE
+      num_branches: 4  # Number of branches per step
+      num_keep: 1  # Number of branches to keep
+      noise_scale: 0.05  # Scale of noise for SDE
       # branch_start_time: 0.0  # When to start branching (0.0 to 1.0)
       
       # Divergence-free ODE configuration (when using divergence_free_ode)
