@@ -63,29 +63,28 @@ inference:
     # "random_search_divfree": RandomSearchDivFreeInference,
 
     # Inference method configuration
-    inference_method: "noise_search_sde"
+    inference_method: "noise_search_divfree_max"
     
     # Method-specific configuration
     method_config:
+      selector: "tm_score_4seq"  # Scoring function
 
       # DivFree Max Simple configuration
       # lambda_div: 0.2  # Scale factor for divergence-free field
       # particle_repulsion_factor: 0.02  # Repulsion strength (default 0.02 of gaussian noise)
       # noise_schedule_end_factor: 0.7  # Linear noise decrease factor (1.0 -> 0.7 by end)
 
-      # Noise Search SDE configuration
       num_branches: 2  # Number of branches per round
       num_keep: 1  # Number of top samples to keep each round
-      noise_scale: 0.05  # Scale of noise for SDE
       num_rounds: 9  # Use all 9 rounds as intended
-      selector: "tm_score_4seq"  # Scoring function
 
+      # Noise Search SDE configuration
+      noise_scale: 0.05  # Scale of noise for SDE
+      
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
-      # num_branches: 4  # Number of branches per round
-      # num_keep: 1  # Number of top samples to keep each round
-      # lambda_div: 0.2
-      # particle_repulsion_factor: 0.02
-      # noise_schedule_end_factor: 0.7
+      lambda_div: 0.2
+      particle_repulsion_factor: 0.02
+      noise_schedule_end_factor: 0.7
       
       # SDE Path Exploration configuration (when using sde_path_exploration)
       # num_branches: 4  # Number of branches per step
