@@ -1760,7 +1760,13 @@ class NoiseSearchInference(InferenceMethod):
 
         # Initialize trajectory collection for all branches
         all_trajectories = {
-            i: {"rigids": [], "bb_prots": [], "trans_0_pred": [], "bb_0_pred": []}
+            i: {
+                "rigids": [],
+                "bb_prots": [],
+                "trans_0_pred": [],
+                "bb_0_pred": [],
+                "feature_states": [],
+            }
             for i in range(num_branches)
         }
         final_psi_preds = [None] * num_branches
@@ -1803,6 +1809,20 @@ class NoiseSearchInference(InferenceMethod):
                     trans_vectorfield = model_out["trans_vectorfield"]
                     rigid_pred = model_out["rigids"]
                     psi_pred = model_out["psi"]
+
+                    # Store complete feature state for proper intermediate state extraction
+                    # Deep copy to ensure independence between timesteps
+                    feature_state_copy = {}
+                    for key, value in branch_feats.items():
+                        if torch.is_tensor(value):
+                            feature_state_copy[key] = value.clone().detach()
+                        else:
+                            feature_state_copy[key] = (
+                                value.copy() if hasattr(value, "copy") else value
+                            )
+                    all_trajectories[branch_idx]["feature_states"].append(
+                        feature_state_copy
+                    )
 
                     # Generate divergence-free max noise with precomputed repulsion
                     rigids_tensor = branch_feats["rigids_t"]
@@ -1909,13 +1929,28 @@ class NoiseSearchInference(InferenceMethod):
                     else None
                 ),
                 "rigid_0_traj": flip(traj["bb_0_pred"]),
+                "feature_states_traj": list(
+                    reversed(traj["feature_states"])
+                ),  # Complete feature states for proper intermediate extraction
             }
 
-            # Use proven working batch dimension handling
-            sample_result = tree.map_structure(
-                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
-            )
-            completed_samples.append(sample_result)
+            # Use proven working batch dimension handling, but preserve feature_states_traj
+            if "feature_states_traj" in sample_result:
+                # Special handling: preserve feature_states_traj, apply batch removal to others
+                feature_states = sample_result.pop("feature_states_traj")
+                processed_result = tree.map_structure(
+                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x,
+                    sample_result,
+                )
+                processed_result["feature_states_traj"] = feature_states
+                completed_samples.append(processed_result)
+            else:
+                # Standard batch dimension removal
+                sample_result = tree.map_structure(
+                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x,
+                    sample_result,
+                )
+                completed_samples.append(sample_result)
 
         self._log.debug(
             f"    Completed synchronized simulation for {num_branches} branches"
