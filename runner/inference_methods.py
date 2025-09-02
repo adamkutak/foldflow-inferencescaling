@@ -919,7 +919,16 @@ class NoiseSearchInference(InferenceMethod):
                 noise_type,
             )
 
-        return sample_out
+        # Extract the actual sample from the result dict and remove batch dimension
+        if isinstance(sample_out, dict) and "sample" in sample_out:
+            raw_sample = sample_out["sample"]
+        else:
+            raw_sample = sample_out
+
+        # Remove batch dimension like _base_sample does
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, raw_sample
+        )
 
     def _noise_search_sde(
         self,
@@ -2852,7 +2861,11 @@ class DivFreeMaxSimpleInference(InferenceMethod):
             noise_schedule_end_factor,
             context,
         )
-        return sample_out
+
+        # Remove batch dimension like _base_sample does
+        return tree.map_structure(
+            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
+        )
 
     def _base_sample_divfree_max(
         self,
