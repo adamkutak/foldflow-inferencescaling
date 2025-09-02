@@ -78,7 +78,7 @@ inference:
       num_keep: 1  # Number of top samples to keep each round
       noise_scale: 0.05  # Scale of noise for SDE
       num_rounds: 9  # Use all 9 rounds as intended
-      selector: "geometric"  # Scoring function
+      selector: "tm_score_4seq"  # Scoring function
 
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
       # num_branches: 4  # Number of branches per round
