@@ -189,6 +189,8 @@ class ExperimentRunner:
             # Track timing and results
             start_time = time.time()
             scores = []
+            tm_scores = []
+            rmsd_scores = []
 
             for sample_idx in range(self.args.num_samples):
                 self.logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
@@ -201,38 +203,50 @@ class ExperimentRunner:
                     )
                     sample_time = time.time() - sample_start
 
-                    # Extract sample and score
+                    # Extract sample
                     if isinstance(sample_result, dict) and "sample" in sample_result:
                         sample_output = sample_result["sample"]
-                        # Use the score from the method if available
+                        # Use the score from the method if available (for selector optimization)
                         if "score" in sample_result:
                             score = sample_result["score"]
                         else:
-                            # Evaluate manually
+                            # Evaluate with the selector function
                             score_fn = sampler.inference_method.get_score_function(
                                 self.args.scoring_function
                             )
                             score = score_fn(sample_output, self.args.sample_length)
                     else:
                         sample_output = sample_result
-                        # Evaluate manually
+                        # Evaluate with the selector function
                         score_fn = sampler.inference_method.get_score_function(
                             self.args.scoring_function
                         )
                         score = score_fn(sample_output, self.args.sample_length)
 
+                    # Always calculate both TM-score and RMSD for comprehensive analysis
+                    dual_scores = sampler.inference_method._dual_score_function(
+                        sample_output, self.args.sample_length
+                    )
+                    tm_score = dual_scores["tm_score"]
+                    rmsd_score = dual_scores["rmsd"]
+
                     scores.append(score)
+                    tm_scores.append(tm_score)
+                    rmsd_scores.append(rmsd_score)
+
                     self.logger.info(
-                        f"    Score: {score:.4f}, Time: {sample_time:.2f}s"
+                        f"    Selector Score: {score:.4f}, TM-Score: {tm_score:.4f}, RMSD: {rmsd_score:.4f}, Time: {sample_time:.2f}s"
                     )
 
                 except Exception as e:
                     self.logger.error(f"Error in sample {sample_idx}: {e}")
                     scores.append(float("nan"))
+                    tm_scores.append(float("nan"))
+                    rmsd_scores.append(float("nan"))
 
             total_time = time.time() - start_time
 
-            # Calculate statistics
+            # Calculate statistics for selector score
             valid_scores = [s for s in scores if not np.isnan(s)]
             if valid_scores:
                 mean_score = np.mean(valid_scores)
@@ -242,23 +256,74 @@ class ExperimentRunner:
             else:
                 mean_score = std_score = max_score = min_score = float("nan")
 
+            # Calculate statistics for TM-scores
+            valid_tm_scores = [s for s in tm_scores if not np.isnan(s)]
+            if valid_tm_scores:
+                mean_tm_score = np.mean(valid_tm_scores)
+                std_tm_score = np.std(valid_tm_scores)
+                max_tm_score = np.max(valid_tm_scores)
+                min_tm_score = np.min(valid_tm_scores)
+            else:
+                mean_tm_score = std_tm_score = max_tm_score = min_tm_score = float(
+                    "nan"
+                )
+
+            # Calculate statistics for RMSD scores
+            valid_rmsd_scores = [s for s in rmsd_scores if not np.isnan(s)]
+            if valid_rmsd_scores:
+                mean_rmsd_score = np.mean(valid_rmsd_scores)
+                std_rmsd_score = np.std(valid_rmsd_scores)
+                max_rmsd_score = np.max(valid_rmsd_scores)
+                min_rmsd_score = np.min(valid_rmsd_scores)
+
+                # Calculate designability metrics (percentage of samples below RMSD thresholds)
+                designability_2 = np.mean(np.array(valid_rmsd_scores) < 2.0) * 100
+                designability_1_5 = np.mean(np.array(valid_rmsd_scores) < 1.5) * 100
+                designability_1 = np.mean(np.array(valid_rmsd_scores) < 1.0) * 100
+            else:
+                mean_rmsd_score = std_rmsd_score = max_rmsd_score = min_rmsd_score = (
+                    float("nan")
+                )
+                designability_2 = designability_1_5 = designability_1 = float("nan")
+
             result = {
                 "method": method_name,
                 "num_branches": branches,
                 "config": config,
                 "num_samples": len(valid_scores),
+                # Selector score (for optimization)
                 "mean_score": mean_score,
                 "std_score": std_score,
                 "max_score": max_score,
                 "min_score": min_score,
-                "total_time": total_time,
-                "time_per_sample": total_time / self.args.num_samples,
                 "scores": scores,
                 "scoring_function": self.args.scoring_function,
+                # TM-score metrics
+                "mean_tm_score": mean_tm_score,
+                "std_tm_score": std_tm_score,
+                "max_tm_score": max_tm_score,
+                "min_tm_score": min_tm_score,
+                "tm_scores": tm_scores,
+                # RMSD metrics
+                "mean_rmsd_score": mean_rmsd_score,
+                "std_rmsd_score": std_rmsd_score,
+                "max_rmsd_score": max_rmsd_score,
+                "min_rmsd_score": min_rmsd_score,
+                "rmsd_scores": rmsd_scores,
+                # Designability metrics
+                "designability_2": designability_2,
+                "designability_1_5": designability_1_5,
+                "designability_1": designability_1,
+                # Timing
+                "total_time": total_time,
+                "time_per_sample": total_time / self.args.num_samples,
             }
 
             self.logger.info(
-                f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
+                f"  Results: Selector={mean_score:.4f}±{std_score:.4f}, TM={mean_tm_score:.4f}±{std_tm_score:.4f}, RMSD={mean_rmsd_score:.4f}±{std_rmsd_score:.4f}, Time={total_time:.2f}s"
+            )
+            self.logger.info(
+                f"  Designability: <2Å={designability_2:.1f}%, <1.5Å={designability_1_5:.1f}%, <1Å={designability_1:.1f}%"
             )
 
             return result
@@ -322,6 +387,18 @@ class ExperimentRunner:
                 }
             )
 
+        # Divergence-free Max (single sample with linear noise schedule and particle repulsion)
+        experiments.append(
+            {
+                "method": "divergence_free_max",
+                "config": {
+                    "lambda_div": self.args.lambda_div,
+                    "noise_schedule_end_factor": 0.7,
+                    "particle_repulsion_factor": 0.02,
+                },
+            }
+        )
+
         # Best-of-N with different N values
         for n_branches in self.args.branch_counts:
             experiments.append(
@@ -330,6 +407,59 @@ class ExperimentRunner:
                     "config": {
                         "num_branches": n_branches,
                         "selector": self.args.scoring_function,
+                    },
+                }
+            )
+
+        # Noise Search SDE with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "noise_search_sde",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": min(
+                            2, n_branches // 2
+                        ),  # Keep fewer candidates for noise search
+                        "noise_scale": self.args.noise_scale,
+                        "selector": self.args.scoring_function,
+                        "num_rounds": self.args.noise_search_rounds,
+                    },
+                }
+            )
+
+        # Noise Search DivFree with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "noise_search_divfree",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": min(
+                            2, n_branches // 2
+                        ),  # Keep fewer candidates for noise search
+                        "lambda_div": self.args.lambda_div,
+                        "selector": self.args.scoring_function,
+                        "num_rounds": self.args.noise_search_rounds,
+                    },
+                }
+            )
+
+        # Noise Search DivFree Max with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "noise_search_divfree_max",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": min(
+                            2, n_branches // 2
+                        ),  # Keep fewer candidates for noise search
+                        "lambda_div": self.args.lambda_div,
+                        "noise_schedule_end_factor": 0.7,
+                        "particle_repulsion_factor": 0.02,
+                        "selector": self.args.scoring_function,
+                        "num_rounds": self.args.noise_search_rounds,
                     },
                 }
             )
@@ -371,14 +501,30 @@ class ExperimentRunner:
                 {
                     "method": result["method"],
                     "num_branches": result["num_branches"],
+                    "scoring_function": result["scoring_function"],
+                    "num_samples": result["num_samples"],
+                    # Selector score (used for optimization)
                     "mean_score": result["mean_score"],
                     "std_score": result["std_score"],
                     "max_score": result["max_score"],
                     "min_score": result["min_score"],
+                    # TM-score metrics
+                    "mean_tm_score": result["mean_tm_score"],
+                    "std_tm_score": result["std_tm_score"],
+                    "max_tm_score": result["max_tm_score"],
+                    "min_tm_score": result["min_tm_score"],
+                    # RMSD metrics
+                    "mean_rmsd_score": result["mean_rmsd_score"],
+                    "std_rmsd_score": result["std_rmsd_score"],
+                    "max_rmsd_score": result["max_rmsd_score"],
+                    "min_rmsd_score": result["min_rmsd_score"],
+                    # Designability metrics
+                    "designability_2": result["designability_2"],
+                    "designability_1_5": result["designability_1_5"],
+                    "designability_1": result["designability_1"],
+                    # Timing
                     "total_time": result["total_time"],
                     "time_per_sample": result["time_per_sample"],
-                    "num_samples": result["num_samples"],
-                    "scoring_function": result["scoring_function"],
                 }
             )
 
@@ -390,9 +536,9 @@ class ExperimentRunner:
 
     def analyze_results(self):
         """Analyze and print experiment results."""
-        print("\n" + "=" * 80)
+        print("\n" + "=" * 100)
         print("INFERENCE SCALING EXPERIMENT RESULTS")
-        print("=" * 80)
+        print("=" * 100)
 
         # Find baseline (standard method)
         baseline = None
@@ -405,11 +551,20 @@ class ExperimentRunner:
             print("Warning: No baseline (standard) method found!")
             return
 
-        baseline_score = baseline["mean_score"]
+        baseline_selector_score = baseline["mean_score"]
+        baseline_tm_score = baseline["mean_tm_score"]
+        baseline_rmsd_score = baseline["mean_rmsd_score"]
         baseline_time = baseline["time_per_sample"]
 
-        print(f"Baseline (Standard): {baseline_score:.4f}±{baseline['std_score']:.4f}")
-        print(f"Scoring Function: {self.args.scoring_function}")
+        print(f"Baseline (Standard):")
+        print(
+            f"  Selector Score ({self.args.scoring_function}): {baseline_selector_score:.4f}±{baseline['std_score']:.4f}"
+        )
+        print(f"  TM-Score: {baseline_tm_score:.4f}±{baseline['std_tm_score']:.4f}")
+        print(f"  RMSD: {baseline_rmsd_score:.4f}±{baseline['std_rmsd_score']:.4f}")
+        print(
+            f"  Designability: <2Å={baseline['designability_2']:.1f}%, <1.5Å={baseline['designability_1_5']:.1f}%, <1Å={baseline['designability_1']:.1f}%"
+        )
         print(f"Sample Length: {self.args.sample_length}")
         print(f"Samples per Method: {self.args.num_samples}")
         print()
@@ -429,18 +584,27 @@ class ExperimentRunner:
 
             print(f"{method_name.upper()}:")
             print(
-                f"{'Branches':<10} {'Mean Score':<12} {'Improvement':<12} {'Time (s)':<10} {'Speedup':<10}"
+                f"{'Branches':<9} {'TM-Score':<13} {'TM-Improv':<10} {'RMSD':<10} {'RMSD-Improv':<12} {'<2Å%':<8} {'<1.5Å%':<8} {'<1Å%':<8} {'Time(s)':<8} {'Speedup':<8}"
             )
-            print("-" * 60)
+            print("-" * 100)
 
             for result in sorted(method_results, key=lambda x: x["num_branches"]):
                 branches = result["num_branches"]
-                mean_score = result["mean_score"]
-                improvement = (
-                    ((mean_score - baseline_score) / baseline_score * 100)
-                    if not np.isnan(mean_score)
+                tm_score = result["mean_tm_score"]
+                rmsd_score = result["mean_rmsd_score"]
+
+                # Calculate improvements
+                tm_improvement = (
+                    ((tm_score - baseline_tm_score) / baseline_tm_score * 100)
+                    if not np.isnan(tm_score) and baseline_tm_score > 0
                     else float("nan")
                 )
+                rmsd_improvement = (
+                    ((baseline_rmsd_score - rmsd_score) / baseline_rmsd_score * 100)
+                    if not np.isnan(rmsd_score) and baseline_rmsd_score > 0
+                    else float("nan")
+                )
+
                 time_per_sample = result["time_per_sample"]
                 speedup = (
                     baseline_time / time_per_sample
@@ -448,29 +612,80 @@ class ExperimentRunner:
                     else float("inf")
                 )
 
+                designability_2 = result["designability_2"]
+                designability_1_5 = result["designability_1_5"]
+                designability_1 = result["designability_1"]
+
                 print(
-                    f"{branches:<10} {mean_score:<12.4f} {improvement:<12.2f}% {time_per_sample:<10.2f} {speedup:<10.2f}x"
+                    f"{branches:<9} {tm_score:<13.4f} {tm_improvement:<10.2f}% {rmsd_score:<10.4f} {rmsd_improvement:<12.2f}% {designability_2:<8.1f} {designability_1_5:<8.1f} {designability_1:<8.1f} {time_per_sample:<8.2f} {speedup:<8.2f}x"
                 )
             print()
 
-        # Find best overall result
-        best_result = max(
+        # Find best results for different metrics
+        best_tm_result = max(
             self.results,
             key=lambda x: (
-                x["mean_score"] if not np.isnan(x["mean_score"]) else float("-inf")
+                x["mean_tm_score"]
+                if not np.isnan(x["mean_tm_score"])
+                else float("-inf")
             ),
         )
-        improvement = (
-            (best_result["mean_score"] - baseline_score) / baseline_score * 100
+
+        best_rmsd_result = min(
+            self.results,
+            key=lambda x: (
+                x["mean_rmsd_score"]
+                if not np.isnan(x["mean_rmsd_score"])
+                else float("inf")
+            ),
         )
 
-        print(f"BEST RESULT:")
-        print(
-            f"Method: {best_result['method']} (branches: {best_result['num_branches']})"
+        best_designability_result = max(
+            self.results,
+            key=lambda x: (
+                x["designability_1"]
+                if not np.isnan(x["designability_1"])
+                else float("-inf")
+            ),
         )
-        print(f"Score: {best_result['mean_score']:.4f}±{best_result['std_score']:.4f}")
-        print(f"Improvement: {improvement:.2f}% over baseline")
-        print(f"Time per sample: {best_result['time_per_sample']:.2f}s")
+
+        tm_improvement = (
+            (best_tm_result["mean_tm_score"] - baseline_tm_score)
+            / baseline_tm_score
+            * 100
+        )
+        rmsd_improvement = (
+            (baseline_rmsd_score - best_rmsd_result["mean_rmsd_score"])
+            / baseline_rmsd_score
+            * 100
+        )
+
+        print(f"BEST RESULTS:")
+        print(
+            f"Best TM-Score: {best_tm_result['method']} (branches: {best_tm_result['num_branches']})"
+        )
+        print(
+            f"  TM-Score: {best_tm_result['mean_tm_score']:.4f}±{best_tm_result['std_tm_score']:.4f}"
+        )
+        print(f"  Improvement: {tm_improvement:.2f}% over baseline")
+        print()
+
+        print(
+            f"Best RMSD: {best_rmsd_result['method']} (branches: {best_rmsd_result['num_branches']})"
+        )
+        print(
+            f"  RMSD: {best_rmsd_result['mean_rmsd_score']:.4f}±{best_rmsd_result['std_rmsd_score']:.4f}"
+        )
+        print(f"  Improvement: {rmsd_improvement:.2f}% over baseline")
+        print()
+
+        print(
+            f"Best Designability (<1Å): {best_designability_result['method']} (branches: {best_designability_result['num_branches']})"
+        )
+        print(
+            f"  <1Å designability: {best_designability_result['designability_1']:.1f}%"
+        )
+        print(f"  Baseline <1Å: {baseline['designability_1']:.1f}%")
         print()
 
 
@@ -496,7 +711,7 @@ def main():
         type=str,
         default="tm_score",
         choices=["tm_score", "rmsd"],
-        help="Scoring function to use for evaluation",
+        help="Scoring function to use for method optimization (both scTM-score and scRMSD are always calculated for analysis)",
     )
 
     parser.add_argument(
@@ -542,6 +757,13 @@ def main():
         help="List of branch counts to use for experiments (default: [2, 4, 8])",
     )
 
+    parser.add_argument(
+        "--noise_search_rounds",
+        type=int,
+        default=9,
+        help="Number of rounds for noise search methods (default: 9)",
+    )
+
     args = parser.parse_args()
 
     print("Starting Inference Scaling Experiments")
@@ -556,6 +778,7 @@ def main():
         f"  GPU ID: {args.gpu_id if args.gpu_id is not None else 'from config (default: 1)'}"
     )
     print(f"  Branch counts: {args.branch_counts}")
+    print(f"  Noise search rounds: {args.noise_search_rounds}")
     print()
 
     # Create and run experiments
