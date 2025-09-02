@@ -67,7 +67,7 @@ inference:
     
     # Method-specific configuration
     method_config:
-      selector: "tm_score_4seq"  # Scoring function
+      selector: "geometric"  # Scoring function
 
       # DivFree Max Simple configuration
       # lambda_div: 0.2  # Scale factor for divergence-free field
