@@ -1173,10 +1173,18 @@ class NoiseSearchInference(InferenceMethod):
             ],  # Complete feature states for proper intermediate extraction
         }
 
-        # Remove batch dimension
-        return tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
-        )
+        # Remove batch dimension from trajectory data, but preserve feature_states_traj dimensions
+        result_copy = {}
+        for key, value in sample_result.items():
+            if key == "feature_states_traj":
+                # Keep feature states as-is to preserve proper tensor dimensions
+                result_copy[key] = value
+            else:
+                # Apply batch dimension removal to other trajectory data
+                result_copy[key] = tree.map_structure(
+                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, value
+                )
+        return result_copy
 
     def _noise_search_divfree_unified(
         self,
@@ -1515,10 +1523,18 @@ class NoiseSearchInference(InferenceMethod):
             "feature_states_traj": all_feature_states,  # Complete feature states for proper intermediate extraction
         }
 
-        # Use proven working batch dimension handling from original divfree code
-        return tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
-        )
+        # Use proven working batch dimension handling from original divfree code, but preserve feature_states_traj dimensions
+        result_copy = {}
+        for key, value in sample_result.items():
+            if key == "feature_states_traj":
+                # Keep feature states as-is to preserve proper tensor dimensions
+                result_copy[key] = value
+            else:
+                # Apply batch dimension removal to other trajectory data
+                result_copy[key] = tree.map_structure(
+                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, value
+                )
+        return result_copy
 
     def _divfree_max_simulate_synchronized(
         self,
@@ -3263,10 +3279,18 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
             ],  # Complete feature states for proper intermediate extraction
         }
 
-        # Remove batch dimension
-        return tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
-        )
+        # Remove batch dimension from trajectory data, but preserve feature_states_traj dimensions
+        result_copy = {}
+        for key, value in sample_result.items():
+            if key == "feature_states_traj":
+                # Keep feature states as-is to preserve proper tensor dimensions
+                result_copy[key] = value
+            else:
+                # Apply batch dimension removal to other trajectory data
+                result_copy[key] = tree.map_structure(
+                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, value
+                )
+        return result_copy
 
     def generate_initial_features(self, sample_length):
         """Generate initial features for a sample."""
