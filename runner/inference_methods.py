@@ -1338,17 +1338,19 @@ class NoiseSearchInference(InferenceMethod):
         }
 
         # Remove batch dimension from trajectory data, but preserve feature_states_traj dimensions
-        result_copy = {}
-        for key, value in sample_result.items():
-            if key == "feature_states_traj":
-                # Keep feature states as-is to preserve proper tensor dimensions
-                result_copy[key] = value
-            else:
-                # Apply batch dimension removal to other trajectory data
-                result_copy[key] = tree.map_structure(
-                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, value
-                )
-        return result_copy
+        if "feature_states_traj" in sample_result:
+            # Special handling: preserve feature_states_traj, apply batch removal to others
+            feature_states = sample_result.pop("feature_states_traj")
+            processed_result = tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+            )
+            processed_result["feature_states_traj"] = feature_states
+            return processed_result
+        else:
+            # Standard batch dimension removal
+            return tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+            )
 
     def _noise_search_divfree_unified(
         self,
@@ -1688,17 +1690,19 @@ class NoiseSearchInference(InferenceMethod):
         }
 
         # Use proven working batch dimension handling from original divfree code, but preserve feature_states_traj dimensions
-        result_copy = {}
-        for key, value in sample_result.items():
-            if key == "feature_states_traj":
-                # Keep feature states as-is to preserve proper tensor dimensions
-                result_copy[key] = value
-            else:
-                # Apply batch dimension removal to other trajectory data
-                result_copy[key] = tree.map_structure(
-                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, value
-                )
-        return result_copy
+        if "feature_states_traj" in sample_result:
+            # Special handling: preserve feature_states_traj, apply batch removal to others
+            feature_states = sample_result.pop("feature_states_traj")
+            processed_result = tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+            )
+            processed_result["feature_states_traj"] = feature_states
+            return processed_result
+        else:
+            # Standard batch dimension removal
+            return tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+            )
 
     def _divfree_max_simulate_synchronized(
         self,
@@ -3444,17 +3448,19 @@ class RandomSearchDivFreeInference(DivergenceFreeODEInference):
         }
 
         # Remove batch dimension from trajectory data, but preserve feature_states_traj dimensions
-        result_copy = {}
-        for key, value in sample_result.items():
-            if key == "feature_states_traj":
-                # Keep feature states as-is to preserve proper tensor dimensions
-                result_copy[key] = value
-            else:
-                # Apply batch dimension removal to other trajectory data
-                result_copy[key] = tree.map_structure(
-                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, value
-                )
-        return result_copy
+        if "feature_states_traj" in sample_result:
+            # Special handling: preserve feature_states_traj, apply batch removal to others
+            feature_states = sample_result.pop("feature_states_traj")
+            processed_result = tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+            )
+            processed_result["feature_states_traj"] = feature_states
+            return processed_result
+        else:
+            # Standard batch dimension removal
+            return tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_result
+            )
 
     def generate_initial_features(self, sample_length):
         """Generate initial features for a sample."""
