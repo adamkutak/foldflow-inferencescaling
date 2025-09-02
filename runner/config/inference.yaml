@@ -47,6 +47,21 @@ inference:
     # in range(min_length, max_length, length_step)
     length_step: 50
     
+
+    # list of methods:
+    # "standard": StandardInference,
+    # "best_of_n": BestOfNInference,
+    # "sde_path_exploration": SDEPathExplorationInference,
+    # "divergence_free_ode": DivergenceFreeODEInference,
+    # "divergence_free_max": DivergenceFreeMaxInference,
+    # "noise_search_sde": NoiseSearchSDEInference,
+    # "noise_search_divfree": NoiseSearchDivFreeInference,
+    # "noise_search_divfree_max": NoiseSearchDivFreeMaxInference,
+    # "sde_simple": SDESimpleInference,
+    # "divergence_free_simple": DivergenceFreeSimpleInference,
+    # "divfree_max_simple": DivFreeMaxSimpleInference,
+    # "random_search_divfree": RandomSearchDivFreeInference,
+
     # Inference method configuration
     inference_method: "divfree_max_simple"
     
