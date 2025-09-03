@@ -121,6 +121,81 @@ class InferenceMethod(ABC):
         self._log.info("Sample massaging completed")
         return massaged_feats
 
+    def _massage_final_sample(
+        self, final_sample: Dict[str, Any], massage_steps: int
+    ) -> Dict[str, Any]:
+        """Massage a final sample output by reconstructing internal features and applying massage_sample.
+
+        Args:
+            final_sample: Final sample output structure (contains prot_traj, rigid_traj, etc.)
+            massage_steps: Number of massaging steps to apply
+
+        Returns:
+            Massaged final sample output
+        """
+        # Extract the final rigid configuration from the trajectory
+        if "rigid_traj" not in final_sample or final_sample["rigid_traj"] is None:
+            self._log.warning("Cannot massage final sample: no rigid_traj found")
+            return final_sample
+
+        # Get the last rigid configuration (index 0 since trajectories are time-flipped)
+        final_rigid_7 = final_sample["rigid_traj"][0]  # Shape: [batch_size, 7] or [7]
+
+        # Ensure proper shape and convert to tensor
+        if not torch.is_tensor(final_rigid_7):
+            final_rigid_7 = torch.tensor(final_rigid_7, dtype=torch.float32)
+
+        # Add batch dimension if missing
+        if final_rigid_7.ndim == 1:
+            final_rigid_7 = final_rigid_7[None]  # Add batch dimension
+
+        device = self.sampler.device
+        final_rigid_7 = final_rigid_7.to(device)
+
+        sample_length = final_rigid_7.shape[0]
+
+        # Reconstruct internal sampling features for massaging
+        sample_feats = {
+            "rigids_t": final_rigid_7,
+            "res_mask": torch.ones(sample_length, device=device),
+            "fixed_mask": torch.zeros(sample_length, device=device),
+            "seq_idx": torch.arange(1, sample_length + 1, device=device),
+            "aatype": torch.zeros(sample_length, dtype=torch.int32, device=device),
+            "chain_idx": torch.zeros(sample_length, dtype=torch.int32, device=device),
+            "sc_ca_t": torch.zeros(sample_length, 3, device=device),
+            "torsion_angles_sin_cos": torch.zeros(sample_length, 7, 2, device=device),
+        }
+
+        # Add batch dimension for massaging
+        sample_feats = tree.map_structure(
+            lambda x: x[None] if x.ndim > 0 else x, sample_feats
+        )
+
+        # Apply massaging
+        massaged_feats = self.massage_sample(sample_feats, massage_steps)
+
+        # Update the final sample with massaged result
+        massaged_sample = final_sample.copy()
+
+        # Update the rigid trajectory with massaged result (remove batch dimension)
+        massaged_rigid_7 = massaged_feats["rigids_t"][0]  # Remove batch dimension
+        massaged_sample["rigid_traj"] = final_sample["rigid_traj"].copy()
+        massaged_sample["rigid_traj"][0] = du.move_to_np(massaged_rigid_7)
+
+        # Recompute protein trajectory with massaged rigids if we have psi_pred
+        if "psi_pred" in final_sample and final_sample["psi_pred"] is not None:
+            # Get psi prediction for final structure
+            psi_pred = self.sampler.model(massaged_feats)["psi"]
+            atom37_massaged = all_atom.compute_backbone(
+                ru.Rigid.from_tensor_7(massaged_feats["rigids_t"]), psi_pred
+            )[0]
+            massaged_sample["prot_traj"] = final_sample["prot_traj"].copy()
+            massaged_sample["prot_traj"][0] = du.move_to_np(
+                atom37_massaged[0]
+            )  # Remove batch dim
+
+        return massaged_sample
+
     def get_score_function(self, selector: str = "tm_score") -> Callable:
         """Get the scoring function based on selector."""
         if selector == "tm_score":
@@ -754,10 +829,8 @@ class NoiseSearchInference(InferenceMethod):
 
         # Extract the actual sample from the result dict and remove batch dimension
         if isinstance(sample_out, dict) and "sample" in sample_out:
-            # Note: Massaging not implemented for NoiseSearchInference as it uses complex multi-sample logic
             return sample_out  # Return the full dict with sample, score, method
         else:
-            # Note: Massaging not implemented for NoiseSearchInference as it uses complex multi-sample logic
             return sample_out
 
     def _noise_search_sde(
@@ -1001,6 +1074,32 @@ class NoiseSearchInference(InferenceMethod):
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
+
+        # Apply massaging if enabled
+        massage_steps = self.config.get("massage_steps", 3)
+        if massage_steps > 0:
+            self._log.info(f"Applying massaging with {massage_steps} steps")
+            sample_feats = self.massage_sample(sample_feats, massage_steps)
+
+            # Recompute final outputs with massaged features
+            final_psi_pred = self.sampler.model(sample_feats)["psi"]
+            atom37_final = all_atom.compute_backbone(
+                ru.Rigid.from_tensor_7(sample_feats["rigids_t"]), final_psi_pred
+            )[0]
+            # Replace the last trajectory point with massaged result
+            all_bb_prots[-1] = du.move_to_np(atom37_final)
+            all_rigids[-1] = du.move_to_np(sample_feats["rigids_t"])
+
+            # Update the final feature state as well
+            if all_feature_states:
+                all_feature_states[-1] = {
+                    key: (
+                        value.clone().detach()
+                        if torch.is_tensor(value)
+                        else (value.copy() if hasattr(value, "copy") else value)
+                    )
+                    for key, value in sample_feats.items()
+                }
 
         # Flip trajectory so that it starts from t=0
         flip = lambda x: np.flip(np.stack(x), (0,))
@@ -1374,6 +1473,32 @@ class NoiseSearchInference(InferenceMethod):
                 all_trans_0_pred.append(du.move_to_np(trans_pred_0))
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
+
+        # Apply massaging if enabled
+        massage_steps = self.config.get("massage_steps", 3)
+        if massage_steps > 0:
+            self._log.info(f"Applying massaging with {massage_steps} steps")
+            sample_feats = self.massage_sample(sample_feats, massage_steps)
+
+            # Recompute final outputs with massaged features
+            final_psi_pred = self.sampler.model(sample_feats)["psi"]
+            atom37_final = all_atom.compute_backbone(
+                ru.Rigid.from_tensor_7(sample_feats["rigids_t"]), final_psi_pred
+            )[0]
+            # Replace the last trajectory point with massaged result
+            all_bb_prots[-1] = du.move_to_np(atom37_final)
+            all_rigids[-1] = du.move_to_np(sample_feats["rigids_t"])
+
+            # Update the final feature state as well
+            if all_feature_states:
+                all_feature_states[-1] = {
+                    key: (
+                        value.clone().detach()
+                        if torch.is_tensor(value)
+                        else (value.copy() if hasattr(value, "copy") else value)
+                    )
+                    for key, value in sample_feats.items()
+                }
 
         # Flip trajectories to correct time order
         flip = lambda x: np.flip(np.stack(x), (0,))

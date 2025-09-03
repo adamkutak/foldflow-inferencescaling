@@ -686,7 +686,7 @@ def main():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=20,
+        default=32,
         help="Number of samples to generate per method (default: 32)",
     )
 
@@ -700,28 +700,28 @@ def main():
     parser.add_argument(
         "--sde_noise_scale",
         type=float,
-        default=0.1,
+        default=0.2,
         help="Noise scale for SDE simple method (default: 0.05)",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.1,
+        default=0.2,
         help="Lambda for divergence-free max method (default: 0.2)",
     )
 
     parser.add_argument(
         "--particle_repulsion_factor",
         type=float,
-        default=0.02,
+        default=0,
         help="Particle repulsion factor for DivFree Max (default: 0.02)",
     )
 
     parser.add_argument(
         "--noise_schedule_end_factor",
         type=float,
-        default=0.5,
+        default=0.7,
         help="Noise schedule end factor for DivFree Max (default: 0.7)",
     )
 
