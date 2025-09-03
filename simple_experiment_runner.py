@@ -698,21 +698,21 @@ def main():
     parser.add_argument(
         "--sde_noise_scale",
         type=float,
-        default=0.05,
+        default=0,
         help="Noise scale for SDE simple method (default: 0.05)",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.05,
+        default=0,
         help="Lambda for divergence-free max method (default: 0.2)",
     )
 
     parser.add_argument(
         "--particle_repulsion_factor",
         type=float,
-        default=0.02,
+        default=0,
         help="Particle repulsion factor for DivFree Max (default: 0.02)",
     )
 
