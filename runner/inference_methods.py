@@ -2991,9 +2991,6 @@ class SDESimpleInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
-            "feature_states_traj": all_feature_states[
-                ::-1
-            ],  # Complete feature states for proper intermediate extraction
         }
 
 
@@ -3140,9 +3137,6 @@ class DivergenceFreeSimpleInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
-            "feature_states_traj": all_feature_states[
-                ::-1
-            ],  # Complete feature states for proper intermediate extraction
         }
 
 
@@ -3233,9 +3227,6 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         all_bb_prots = []
         all_trans_0_pred = []
         all_bb_0_pred = []
-        all_feature_states = (
-            []
-        )  # Store complete feature states for proper intermediate state extraction
         final_psi_pred = None
 
         sample_feats = init_feats.copy()
@@ -3246,17 +3237,6 @@ class DivFreeMaxSimpleInference(InferenceMethod):
                 sample_feats = self.sampler.exp._set_t_feats(
                     sample_feats, t, torch.ones((1,)).to(device)
                 )
-
-                # Store complete feature state for proper intermediate state extraction
-                feature_state_copy = {}
-                for key, value in sample_feats.items():
-                    if torch.is_tensor(value):
-                        feature_state_copy[key] = value.clone().detach()
-                    else:
-                        feature_state_copy[key] = (
-                            value.copy() if hasattr(value, "copy") else value
-                        )
-                all_feature_states.append(feature_state_copy)
 
                 # Get model prediction
                 model_out = self.sampler.model(sample_feats)
@@ -3346,7 +3326,6 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         all_bb_0_pred = flip(all_bb_0_pred)
 
         # Flip feature states trajectory
-        all_feature_states = all_feature_states[::-1]
 
         sample_result = {
             "prot_traj": all_bb_prots,
@@ -3354,7 +3333,6 @@ class DivFreeMaxSimpleInference(InferenceMethod):
             "trans_traj": all_trans_0_pred,
             "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
             "rigid_0_traj": all_bb_0_pred,
-            "feature_states_traj": all_feature_states,  # Complete feature states for proper intermediate extraction
         }
 
         return sample_result
