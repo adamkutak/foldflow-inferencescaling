@@ -712,7 +712,7 @@ def main():
     parser.add_argument(
         "--particle_repulsion_factor",
         type=float,
-        default=0,
+        default=0.02,
         help="Particle repulsion factor for DivFree Max (default: 0.02)",
     )
 
