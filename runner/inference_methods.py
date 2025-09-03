@@ -651,7 +651,9 @@ class NoiseSearchInference(InferenceMethod):
         num_keep = self.config.get("num_keep", 2)
         selector = self.config.get("selector", "tm_score")
         num_rounds = self.config.get("num_rounds", 3)
-        noise_type = self.config.get("noise_type", "sde")  # sde, divfree, divfree_max
+        noise_type = self.config.get(
+            "noise_type", "divfree_max"
+        )  # sde, divfree, divfree_max
 
         # Get noise-specific parameters
         if noise_type == "sde":
