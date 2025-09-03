@@ -71,7 +71,7 @@ inference:
       selector: "tm_score_4seq"  # Scoring function
       
       # Sample massaging configuration (applies to all noising methods)
-      massage_steps: 3  # Number of additional inference steps to clean up noisy samples (0 to disable)
+      massage_steps: 0  # Number of additional inference steps to clean up noisy samples (0 to disable)
 
       # DivFree Max Simple configuration
       # lambda_div: 0.2  # Scale factor for divergence-free field
