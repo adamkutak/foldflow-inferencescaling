@@ -87,7 +87,7 @@ inference:
       
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
       lambda_div: 0.3
-      particle_repulsion_factor: 0.02
+      particle_repulsion_factor: 0
       noise_schedule_end_factor: 0.7
 
       # random search + noise search configuration
