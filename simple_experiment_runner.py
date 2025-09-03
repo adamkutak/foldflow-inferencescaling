@@ -728,7 +728,7 @@ def main():
     parser.add_argument(
         "--massage_steps",
         type=int,
-        default=0,
+        default=1,
         help="Number of massaging steps to clean up noisy samples (default: 3, 0 to disable)",
     )
 
