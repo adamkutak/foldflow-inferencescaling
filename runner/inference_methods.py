@@ -1610,7 +1610,7 @@ class NoiseSearchInference(InferenceMethod):
             # Initial self-conditioning for each branch if enabled
             if (
                 self.sampler.exp._model_conf.embed.embed_self_conditioning
-                and simulation_steps
+                and len(simulation_steps) > 0
             ):
                 branch_feats = self.sampler.exp._set_t_feats(
                     branch_feats, simulation_steps[0], t_placeholder
