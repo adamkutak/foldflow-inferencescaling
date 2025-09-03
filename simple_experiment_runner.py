@@ -404,6 +404,7 @@ class SimpleMethodsRunner:
                 "method": "sde_simple",
                 "config": {
                     "noise_scale": self.args.sde_noise_scale,
+                    "massage_steps": self.args.massage_steps,
                 },
             }
         )
@@ -416,6 +417,7 @@ class SimpleMethodsRunner:
                     "lambda_div": self.args.lambda_div,
                     "particle_repulsion_factor": self.args.particle_repulsion_factor,
                     "noise_schedule_end_factor": self.args.noise_schedule_end_factor,
+                    "massage_steps": self.args.massage_steps,
                 },
             }
         )
@@ -698,14 +700,14 @@ def main():
     parser.add_argument(
         "--sde_noise_scale",
         type=float,
-        default=0.4,
+        default=0.1,
         help="Noise scale for SDE simple method (default: 0.05)",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.2,
+        default=0.1,
         help="Lambda for divergence-free max method (default: 0.2)",
     )
 
@@ -719,8 +721,15 @@ def main():
     parser.add_argument(
         "--noise_schedule_end_factor",
         type=float,
-        default=0.7,
+        default=0.5,
         help="Noise schedule end factor for DivFree Max (default: 0.7)",
+    )
+
+    parser.add_argument(
+        "--massage_steps",
+        type=int,
+        default=3,
+        help="Number of massaging steps to clean up noisy samples (default: 3, 0 to disable)",
     )
 
     parser.add_argument(
@@ -742,6 +751,7 @@ def main():
     print(f"  DivFree lambda: {args.lambda_div}")
     print(f"  Particle repulsion factor: {args.particle_repulsion_factor}")
     print(f"  Noise schedule end factor: {args.noise_schedule_end_factor}")
+    print(f"  Massage steps: {args.massage_steps}")
     print(f"  GPU IDs: {args.gpu_ids}")
     print()
 
