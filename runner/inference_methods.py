@@ -3638,7 +3638,9 @@ class RandomSearchNoiseInference(NoiseSearchInference):
         self._log.info(f"Phase 1: Random search over {num_branches} initial noises")
 
         selected_noises, best_random_score, best_random_sample = (
-            self._random_search_phase(num_branches, selector, sample_length, context)
+            self._random_search_phase(
+                num_branches, num_keep, selector, sample_length, context
+            )
         )
 
         # Step 2: Use selected noises for noise search refinement
@@ -3661,7 +3663,9 @@ class RandomSearchNoiseInference(NoiseSearchInference):
 
         return best_sample
 
-    def _random_search_phase(self, num_branches, selector, sample_length, context):
+    def _random_search_phase(
+        self, num_branches, num_keep, selector, sample_length, context
+    ):
         """Phase 1: Random search to identify best initial noises."""
         score_fn = self.get_score_function(selector)
         candidates = []
