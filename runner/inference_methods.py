@@ -375,6 +375,12 @@ class InferenceMethod(ABC):
             f"        _simulate_to_completion: {len(remaining_steps)} steps from t={current_t:.4f} to t={min_t:.4f}"
         )
 
+        # Setup t_placeholder for self-conditioning
+        if feats["rigids_t"].ndim == 2:
+            t_placeholder = torch.ones((1,)).to(device)
+        else:
+            t_placeholder = torch.ones((feats["rigids_t"].shape[0],)).to(device)
+
         # Initialize trajectory collection
         all_rigids = [du.move_to_np(copy.deepcopy(feats["rigids_t"]))]
         all_bb_prots = []
@@ -383,18 +389,30 @@ class InferenceMethod(ABC):
         final_psi_pred = None
 
         with torch.no_grad():
+            # Initial self-conditioning if enabled (for the first step)
+            if (
+                self.sampler.exp._model_conf.embed.embed_self_conditioning
+                and remaining_steps
+            ):
+                feats = self.sampler.exp._set_t_feats(
+                    feats, remaining_steps[0], t_placeholder
+                )
+                feats = self.sampler.exp._self_conditioning(feats)
+
             for step_idx, t in enumerate(remaining_steps):
                 self._log.debug(f"          Step {step_idx}: t={t:.4f}")
 
-                feats = self.sampler.exp._set_t_feats(
-                    feats, t, torch.ones((1,)).to(device)
-                )
+                feats = self.sampler.exp._set_t_feats(feats, t, t_placeholder)
                 model_out = self.sampler.model(feats)
 
                 rot_vectorfield = model_out["rot_vectorfield"]
                 trans_vectorfield = model_out["trans_vectorfield"]
                 rigid_pred = model_out["rigids"]
                 psi_pred = model_out["psi"]
+
+                # Update self-conditioning if enabled
+                if self.sampler.exp._model_conf.embed.embed_self_conditioning:
+                    feats["sc_ca_t"] = rigid_pred[..., 4:]
 
                 fixed_mask = feats["fixed_mask"] * feats["res_mask"]
                 flow_mask = (1 - feats["fixed_mask"]) * feats["res_mask"]
@@ -786,6 +804,12 @@ class NoiseSearchInference(InferenceMethod):
         device = init_feats["rigids_t"].device
         min_t = self.sampler._fm_conf.min_t
 
+        # Setup t_placeholder for self-conditioning
+        if init_feats["rigids_t"].ndim == 2:
+            t_placeholder = torch.ones((1,)).to(device)
+        else:
+            t_placeholder = torch.ones((init_feats["rigids_t"].shape[0],)).to(device)
+
         # Find the step index for start_t
         start_step_idx = 0
         for i, t in enumerate(reverse_steps):
@@ -809,10 +833,20 @@ class NoiseSearchInference(InferenceMethod):
         sample_feats = init_feats.copy()
 
         with torch.no_grad():
+            # Initial self-conditioning if enabled
+            if (
+                self.sampler.exp._model_conf.embed.embed_self_conditioning
+                and simulation_steps
+            ):
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, simulation_steps[0], t_placeholder
+                )
+                sample_feats = self.sampler.exp._self_conditioning(sample_feats)
+
             for step_idx, t in enumerate(simulation_steps):
                 # Apply SDE step with noise
                 sample_feats = self.sampler.exp._set_t_feats(
-                    sample_feats, t, torch.ones((1,)).to(device)
+                    sample_feats, t, t_placeholder
                 )
                 model_out = self.sampler.model(sample_feats)
 
@@ -820,6 +854,10 @@ class NoiseSearchInference(InferenceMethod):
                 trans_vectorfield = model_out["trans_vectorfield"]
                 rigid_pred = model_out["rigids"]
                 psi_pred = model_out["psi"]
+
+                # Update self-conditioning if enabled
+                if self.sampler.exp._model_conf.embed.embed_self_conditioning:
+                    sample_feats["sc_ca_t"] = rigid_pred[..., 4:]
 
                 # Add noise for SDE
                 noise_rot = (
@@ -1101,6 +1139,12 @@ class NoiseSearchInference(InferenceMethod):
         device = init_feats["rigids_t"].device
         min_t = self.sampler._fm_conf.min_t
 
+        # Setup t_placeholder for self-conditioning
+        if init_feats["rigids_t"].ndim == 2:
+            t_placeholder = torch.ones((1,)).to(device)
+        else:
+            t_placeholder = torch.ones((init_feats["rigids_t"].shape[0],)).to(device)
+
         # Find the step index for start_t
         start_step_idx = 0
         for i, t in enumerate(reverse_steps):
@@ -1124,10 +1168,20 @@ class NoiseSearchInference(InferenceMethod):
         sample_feats = init_feats.copy()
 
         with torch.no_grad():
+            # Initial self-conditioning if enabled
+            if (
+                self.sampler.exp._model_conf.embed.embed_self_conditioning
+                and simulation_steps
+            ):
+                sample_feats = self.sampler.exp._set_t_feats(
+                    sample_feats, simulation_steps[0], t_placeholder
+                )
+                sample_feats = self.sampler.exp._self_conditioning(sample_feats)
+
             for step_idx, t in enumerate(simulation_steps):
                 # Apply divergence-free step
                 sample_feats = self.sampler.exp._set_t_feats(
-                    sample_feats, t, torch.ones((1,)).to(device)
+                    sample_feats, t, t_placeholder
                 )
                 model_out = self.sampler.model(sample_feats)
 
@@ -1135,6 +1189,10 @@ class NoiseSearchInference(InferenceMethod):
                 trans_vectorfield = model_out["trans_vectorfield"]
                 rigid_pred = model_out["rigids"]
                 psi_pred = model_out["psi"]
+
+                # Update self-conditioning if enabled
+                if self.sampler.exp._model_conf.embed.embed_self_conditioning:
+                    sample_feats["sc_ca_t"] = rigid_pred[..., 4:]
 
                 # Generate divergence-free noise based on noise_type
                 rigids_tensor = sample_feats["rigids_t"]
@@ -1288,6 +1346,14 @@ class NoiseSearchInference(InferenceMethod):
         device = candidate_feats["rigids_t"].device
         min_t = self.sampler._fm_conf.min_t
 
+        # Setup t_placeholder for self-conditioning
+        if candidate_feats["rigids_t"].ndim == 2:
+            t_placeholder = torch.ones((1,)).to(device)
+        else:
+            t_placeholder = torch.ones((candidate_feats["rigids_t"].shape[0],)).to(
+                device
+            )
+
         # Find the step index for start_t
         start_step_idx = 0
         for i, t in enumerate(reverse_steps):
@@ -1305,6 +1371,15 @@ class NoiseSearchInference(InferenceMethod):
                 lambda x: x.clone() if torch.is_tensor(x) else x.copy(),
                 candidate_feats,
             )
+            # Initial self-conditioning for each branch if enabled
+            if (
+                self.sampler.exp._model_conf.embed.embed_self_conditioning
+                and simulation_steps
+            ):
+                branch_feats = self.sampler.exp._set_t_feats(
+                    branch_feats, simulation_steps[0], t_placeholder
+                )
+                branch_feats = self.sampler.exp._self_conditioning(branch_feats)
             all_branch_feats.append(branch_feats)
 
         # Initialize trajectory collection for all branches
@@ -1326,30 +1401,44 @@ class NoiseSearchInference(InferenceMethod):
 
         with torch.no_grad():
             for step_idx, t in enumerate(simulation_steps):
-                # Extract positions from all branches for repulsion calculation
+                # Extract positions and rotations from all branches for repulsion calculation
                 branch_positions = []
+                branch_rotations = []
                 for branch_feats in all_branch_feats:
                     rigid_obj = ru.Rigid.from_tensor_7(branch_feats["rigids_t"])
                     positions = rigid_obj.get_trans()  # [1, seq_len, 3]
+                    rotations = (
+                        rigid_obj.get_rots().get_rot_mats()
+                    )  # [1, seq_len, 3, 3]
                     branch_positions.append(
                         positions[0]
                     )  # Remove batch dim -> [seq_len, 3]
+                    branch_rotations.append(
+                        rotations[0]
+                    )  # Remove batch dim -> [seq_len, 3, 3]
 
-                # Stack into virtual batch for repulsion calculation
+                # Stack into virtual batches for repulsion calculation
                 batch_positions = torch.stack(
                     branch_positions, dim=0
                 )  # [num_branches, seq_len, 3]
+                batch_rotations = torch.stack(
+                    branch_rotations, dim=0
+                )  # [num_branches, seq_len, 3, 3]
 
                 # Calculate repulsion forces between all branches
-                repulsion_forces = self._calculate_synchronized_repulsion(
+                trans_repulsion_forces = self._calculate_synchronized_repulsion(
                     batch_positions, particle_repulsion_factor
                 )  # [num_branches, seq_len, 3]
+
+                rot_repulsion_forces = self._calculate_synchronized_rotation_repulsion(
+                    batch_rotations, particle_repulsion_factor
+                )  # [num_branches, seq_len, 3, 3]
 
                 # Process each branch with its repulsion force
                 for branch_idx, branch_feats in enumerate(all_branch_feats):
                     # Set time features
                     branch_feats = self.sampler.exp._set_t_feats(
-                        branch_feats, t, torch.ones((1,)).to(device)
+                        branch_feats, t, t_placeholder
                     )
 
                     # Get model prediction
@@ -1358,6 +1447,10 @@ class NoiseSearchInference(InferenceMethod):
                     trans_vectorfield = model_out["trans_vectorfield"]
                     rigid_pred = model_out["rigids"]
                     psi_pred = model_out["psi"]
+
+                    # Update self-conditioning if enabled
+                    if self.sampler.exp._model_conf.embed.embed_self_conditioning:
+                        branch_feats["sc_ca_t"] = rigid_pred[..., 4:]
 
                     # Store complete feature state for proper intermediate state extraction
                     # Deep copy to ensure independence between timesteps
@@ -1381,17 +1474,21 @@ class NoiseSearchInference(InferenceMethod):
                     rot_mats = rigid_obj.get_rots().get_rot_mats()
                     trans_vecs = rigid_obj.get_trans()
 
-                    # Use synchronized repulsion for translation (repulsion acts on positions)
-                    trans_repulsion = repulsion_forces[
+                    # Use appropriate repulsion for translation and rotation
+                    trans_repulsion_for_branch = trans_repulsion_forces[
                         branch_idx : branch_idx + 1
                     ]  # [1, seq_len, 3] - add batch dim back
 
-                    # Generate divergence-free max noise with external repulsion
+                    rot_repulsion_for_branch = rot_repulsion_forces[
+                        branch_idx : branch_idx + 1
+                    ]  # [1, seq_len, 3, 3] - add batch dim back
+
+                    # Generate divergence-free max noise with external repulsion for rotations
                     rot_divfree_noise = self._divfree_max_noise_with_repulsion(
                         rot_mats,
                         t_batch,
                         rot_vectorfield,
-                        None,  # No repulsion for rotations
+                        rot_repulsion_for_branch,  # Apply rotational repulsion
                         lambda_div,
                         particle_repulsion_factor,
                         noise_schedule_end_factor,
@@ -1401,7 +1498,7 @@ class NoiseSearchInference(InferenceMethod):
                         trans_vecs,
                         t_batch,
                         trans_vectorfield,
-                        trans_repulsion,
+                        trans_repulsion_for_branch,
                         lambda_div,
                         particle_repulsion_factor,
                         noise_schedule_end_factor,
@@ -1528,6 +1625,33 @@ class NoiseSearchInference(InferenceMethod):
 
         # Reshape back to position space and scale
         repulsion_forces = repulsion_flat.view(num_branches, seq_len, 3)
+        return repulsion_forces * repulsion_strength
+
+    def _calculate_synchronized_rotation_repulsion(
+        self, batch_rotations, repulsion_strength
+    ):
+        """Calculate repulsion forces between rotation matrices of all samples in the synchronized batch.
+
+        Args:
+            batch_rotations: [num_branches, seq_len, 3, 3] - rotation matrices for all branches
+            repulsion_strength: Strength factor for repulsion
+
+        Returns:
+            repulsion_forces: [num_branches, seq_len, 3, 3] - repulsion forces for each branch
+        """
+        from runner.divergence_free_utils import calculate_euclidean_repulsion_forces
+
+        # Flatten rotation matrices for repulsion calculation
+        # [num_branches, seq_len, 3, 3] -> [num_branches, seq_len*9]
+        num_branches, seq_len, _, _ = batch_rotations.shape
+        flattened_rotations = batch_rotations.view(num_branches, -1)
+
+        # Calculate repulsion between branches based on rotation matrix differences
+        repulsion_flat = calculate_euclidean_repulsion_forces(flattened_rotations)
+
+        # Reshape back to rotation matrix format and scale
+        # [num_branches, seq_len*9] -> [num_branches, seq_len, 3, 3]
+        repulsion_forces = repulsion_flat.view(num_branches, seq_len, 3, 3)
         return repulsion_forces * repulsion_strength
 
     def _divfree_max_noise_with_repulsion(
@@ -1760,163 +1884,16 @@ class SDESimpleInference(InferenceMethod):
                 if self.sampler.exp._model_conf.embed.embed_self_conditioning:
                     sample_feats["sc_ca_t"] = rigid_pred[..., 4:]
 
-                fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
-                flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
-
-                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
-                    rigid_t=ru.Rigid.from_tensor_7(sample_feats["rigids_t"]),
-                    rot_vectorfield=du.move_to_np(rot_vectorfield),
-                    trans_vectorfield=du.move_to_np(trans_vectorfield),
-                    flow_mask=du.move_to_np(flow_mask),
-                    t=t,
-                    dt=dt,
-                    center=True,
-                    noise_scale=1.0,
-                )
-
-                sample_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
-
-                # Collect trajectory data
-                all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
-
-                # Calculate x0 prediction
-                gt_trans_0 = sample_feats["rigids_t"][..., 4:]
-                pred_trans_0 = rigid_pred[..., 4:]
-                trans_pred_0 = (
-                    flow_mask[..., None] * pred_trans_0
-                    + fixed_mask[..., None] * gt_trans_0
-                )
-
-                atom37_0 = all_atom.compute_backbone(
-                    ru.Rigid.from_tensor_7(rigid_pred), psi_pred
-                )[0]
-                all_bb_0_pred.append(du.move_to_np(atom37_0))
-                all_trans_0_pred.append(du.move_to_np(trans_pred_0))
-
-                atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
-                all_bb_prots.append(du.move_to_np(atom37_t))
-                final_psi_pred = psi_pred
-
-        # Flip trajectory so that it starts from t=0
-        flip = lambda x: np.flip(np.stack(x), (0,))
-        all_bb_prots = flip(all_bb_prots)
-        all_rigids = flip(all_rigids)
-        all_trans_0_pred = flip(all_trans_0_pred)
-        all_bb_0_pred = flip(all_bb_0_pred)
-
-        return {
-            "prot_traj": all_bb_prots,
-            "rigid_traj": all_rigids,
-            "trans_traj": all_trans_0_pred,
-            "psi_pred": final_psi_pred[None] if final_psi_pred is not None else None,
-            "rigid_0_traj": all_bb_0_pred,
-        }
-
-
-class DivergenceFreeSimpleInference(InferenceMethod):
-    """Simple divergence-free inference with noise but no branching."""
-
-    def sample(
-        self, sample_length: int, context: Optional[torch.Tensor] = None
-    ) -> Dict[str, Any]:
-        """Generate samples using divergence-free noise but no branching."""
-        lambda_div = self.config.get("lambda_div", 0.2)
-
-        self._log.info(
-            f"Running simple divergence-free sampling with lambda_div={lambda_div}"
-        )
-
-        # Initialize features (same as standard method)
-        res_mask = np.ones(sample_length)
-        fixed_mask = np.zeros_like(res_mask)
-        aatype = torch.zeros(sample_length, dtype=torch.int32)
-        chain_idx = torch.zeros_like(aatype)
-
-        ref_sample = self.sampler.flow_matcher.sample_ref(
-            n_samples=sample_length,
-            as_tensor_7=True,
-        )
-        res_idx = torch.arange(1, sample_length + 1)
-
-        init_feats = {
-            "res_mask": res_mask,
-            "seq_idx": res_idx,
-            "fixed_mask": fixed_mask,
-            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
-            "sc_ca_t": np.zeros((sample_length, 3)),
-            "aatype": aatype,
-            "chain_idx": chain_idx,
-            **ref_sample,
-        }
-
-        # Add batch dimension and move to GPU
-        init_feats = tree.map_structure(
-            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
-        )
-        init_feats = tree.map_structure(
-            lambda x: x[None].to(self.sampler.device), init_feats
-        )
-
-        # Run simple divergence-free sampling
-        sample_out = self._simple_divergence_free_inference(
-            init_feats, lambda_div, context
-        )
-
-        # Remove batch dimension like _base_sample does
-        sample_result = tree.map_structure(
-            lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
-        )
-
-        return sample_result
-
-    def _simple_divergence_free_inference(self, data_init, lambda_div, context):
-        """Simple divergence-free sampling with noise at every step."""
-        sample_feats = tree.map_structure(
-            lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
-        )
-        device = sample_feats["rigids_t"].device
-
-        num_t = self.sampler._fm_conf.num_t
-        min_t = self.sampler._fm_conf.min_t
-
-        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
-        dt = reverse_steps[0] - reverse_steps[1]
-
-        # Setup t_placeholder for self-conditioning
-        if sample_feats["rigids_t"].ndim == 2:
-            t_placeholder = torch.ones((1,)).to(device)
-        else:
-            t_placeholder = torch.ones((sample_feats["rigids_t"].shape[0],)).to(device)
-
-        # Initialize trajectory collection
-        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats["rigids_t"]))]
-        all_bb_prots = []
-        all_trans_0_pred = []
-        all_bb_0_pred = []
-        final_psi_pred = None
-
-        with torch.no_grad():
-            # Initial self-conditioning if enabled
-            if self.sampler.exp._model_conf.embed.embed_self_conditioning:
-                sample_feats = self.sampler.exp._set_t_feats(
-                    sample_feats, reverse_steps[0], t_placeholder
-                )
-                sample_feats = self.sampler.exp._self_conditioning(sample_feats)
-
-            for t in reverse_steps:
-                sample_feats = self.sampler.exp._set_t_feats(
-                    sample_feats, t, t_placeholder
-                )
-                model_out = self.sampler.model(sample_feats)
-
-                rot_vectorfield = model_out["rot_vectorfield"]
-                trans_vectorfield = model_out["trans_vectorfield"]
-                rigid_pred = model_out["rigids"]
-                psi_pred = model_out["psi"]
-
-                # Update self-conditioning if enabled
-                if self.sampler.exp._model_conf.embed.embed_self_conditioning:
-                    sample_feats["sc_ca_t"] = rigid_pred[..., 4:]
+                # Add SDE noise if noise_scale > 0
+                if noise_scale > 0:
+                    noise_rot = (
+                        torch.randn_like(rot_vectorfield) * noise_scale * np.sqrt(dt)
+                    )
+                    noise_trans = (
+                        torch.randn_like(trans_vectorfield) * noise_scale * np.sqrt(dt)
+                    )
+                    rot_vectorfield = rot_vectorfield + noise_rot
+                    trans_vectorfield = trans_vectorfield + noise_trans
 
                 fixed_mask = sample_feats["fixed_mask"] * sample_feats["res_mask"]
                 flow_mask = (1 - sample_feats["fixed_mask"]) * sample_feats["res_mask"]
@@ -2063,6 +2040,35 @@ class DivFreeMaxSimpleInference(InferenceMethod):
 
         sample_feats = init_feats.copy()
 
+        # Generate persistent repulsion directions (if repulsion enabled)
+        persistent_rot_direction = None
+        persistent_trans_direction = None
+        if particle_repulsion_factor > 0:
+            # Generate consistent directions that will persist across all timesteps
+            rot_shape = sample_feats["rigids_t"].shape[:-1] + (
+                3,
+                3,
+            )  # [1, seq_len, 3, 3]
+            trans_shape = sample_feats["rigids_t"].shape[:-1] + (3,)  # [1, seq_len, 3]
+
+            persistent_rot_direction = torch.randn(rot_shape, device=device)
+            persistent_trans_direction = torch.randn(trans_shape, device=device)
+
+            # Normalize to unit vectors for consistent magnitude scaling
+            rot_dims = tuple(range(1, persistent_rot_direction.ndim))
+            trans_dims = tuple(range(1, persistent_trans_direction.ndim))
+            rot_norm = torch.linalg.vector_norm(
+                persistent_rot_direction, dim=rot_dims, keepdim=True
+            )
+            trans_norm = torch.linalg.vector_norm(
+                persistent_trans_direction, dim=trans_dims, keepdim=True
+            )
+
+            persistent_rot_direction = persistent_rot_direction / (rot_norm + 1e-8)
+            persistent_trans_direction = persistent_trans_direction / (
+                trans_norm + 1e-8
+            )
+
         with torch.no_grad():
             # Initial self-conditioning if enabled
             if self.sampler.exp._model_conf.embed.embed_self_conditioning:
@@ -2098,26 +2104,86 @@ class DivFreeMaxSimpleInference(InferenceMethod):
                 rot_mats = rigid_obj.get_rots().get_rot_mats()
                 trans_vecs = rigid_obj.get_trans()
 
-                # Generate divergence-free max noise for rotation field
-                rot_divfree_noise = divfree_max_noise(
-                    rot_mats,
-                    t_batch,
-                    rot_vectorfield,
-                    lambda_div=lambda_div,
-                    repulsion_strength=particle_repulsion_factor,
-                    noise_schedule_end_factor=noise_schedule_end_factor,
-                    min_t=min_t,
+                # Generate divergence-free noise without repulsion (since batch_size=1)
+                from runner.divergence_free_utils import (
+                    divfree_swirl_si,
+                    make_divergence_free,
                 )
 
-                # Generate divergence-free max noise for translation field
-                trans_divfree_noise = divfree_max_noise(
-                    trans_vecs,
-                    t_batch,
-                    trans_vectorfield,
-                    lambda_div=lambda_div,
-                    repulsion_strength=particle_repulsion_factor,
-                    noise_schedule_end_factor=noise_schedule_end_factor,
-                    min_t=min_t,
+                # Calculate time-dependent noise scaling (matching divfree_max_noise)
+                t_scalar = t_batch[0].item()
+                normalized_time = (1.0 - t_scalar) / (1.0 - min_t)
+                noise_scale_factor = (
+                    1.0 + (noise_schedule_end_factor - 1.0) * normalized_time
+                )
+
+                # Generate standard divergence-free noise
+                rot_divfree_base = divfree_swirl_si(
+                    rot_mats, t_batch, None, rot_vectorfield
+                )
+                trans_divfree_base = divfree_swirl_si(
+                    trans_vecs, t_batch, None, trans_vectorfield
+                )
+
+                # Add fake repulsion: persistent direction with magnitude scaled to Gaussian noise
+                if particle_repulsion_factor > 0:
+                    # Calculate magnitudes of base divergence-free noise
+                    rot_dims = tuple(range(1, rot_divfree_base.ndim))
+                    trans_dims = tuple(range(1, trans_divfree_base.ndim))
+                    rot_magnitude = torch.linalg.vector_norm(
+                        rot_divfree_base, dim=rot_dims
+                    ).mean()
+                    trans_magnitude = torch.linalg.vector_norm(
+                        trans_divfree_base, dim=trans_dims
+                    ).mean()
+
+                    # Generate persistent repulsion-like forces with some randomness
+                    # Mix persistent direction with small random component for realism
+                    randomness_factor = 0.3  # 30% randomness, 70% consistent direction
+
+                    random_rot_component = (
+                        torch.randn_like(rot_divfree_base) * randomness_factor
+                    )
+                    random_trans_component = (
+                        torch.randn_like(trans_divfree_base) * randomness_factor
+                    )
+
+                    fake_rot_repulsion = (
+                        (
+                            persistent_rot_direction * (1 - randomness_factor)
+                            + random_rot_component
+                        )
+                        * rot_magnitude
+                        * particle_repulsion_factor
+                    )
+                    fake_trans_repulsion = (
+                        (
+                            persistent_trans_direction * (1 - randomness_factor)
+                            + random_trans_component
+                        )
+                        * trans_magnitude
+                        * particle_repulsion_factor
+                    )
+
+                    # Make fake repulsion divergence-free
+                    fake_rot_repulsion = make_divergence_free(
+                        fake_rot_repulsion, rot_mats, t_batch, rot_vectorfield
+                    )
+                    fake_trans_repulsion = make_divergence_free(
+                        fake_trans_repulsion, trans_vecs, t_batch, trans_vectorfield
+                    )
+
+                    # Combine base noise with fake repulsion
+                    rot_total_noise = rot_divfree_base + fake_rot_repulsion
+                    trans_total_noise = trans_divfree_base + fake_trans_repulsion
+                else:
+                    rot_total_noise = rot_divfree_base
+                    trans_total_noise = trans_divfree_base
+
+                # Apply time-dependent scaling and lambda scaling
+                rot_divfree_noise = lambda_div * noise_scale_factor * rot_total_noise
+                trans_divfree_noise = (
+                    lambda_div * noise_scale_factor * trans_total_noise
                 )
 
                 # Add divergence-free max noise to vector fields
@@ -2521,7 +2587,7 @@ def get_inference_method(
         "noise_search_divfree": NoiseSearchDivFreeInference,
         "noise_search_divfree_max": NoiseSearchDivFreeMaxInference,
         "sde_simple": SDESimpleInference,
-        "divergence_free_simple": DivergenceFreeSimpleInference,
+        # "divergence_free_simple": DivergenceFreeSimpleInference,
         "divfree_max_simple": DivFreeMaxSimpleInference,
         # "random_search_divfree": RandomSearchDivFreeInference,
         "random_search_noise": RandomSearchNoiseInference,
