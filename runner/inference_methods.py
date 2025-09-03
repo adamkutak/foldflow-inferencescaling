@@ -753,36 +753,10 @@ class NoiseSearchInference(InferenceMethod):
 
         # Extract the actual sample from the result dict and remove batch dimension
         if isinstance(sample_out, dict) and "sample" in sample_out:
-            # Apply massaging if enabled
-            massage_steps = self.config.get("massage_steps", 3)
-            if massage_steps > 0:
-                # Add batch dimension back for massaging
-                sample_feats = tree.map_structure(
-                    lambda x: x[None] if x is not None and x.ndim > 0 else x,
-                    sample_out["sample"],
-                )
-                sample_feats = self.massage_sample(sample_feats, massage_steps)
-                # Remove batch dimension again and update the result
-                massaged_sample = tree.map_structure(
-                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x,
-                    sample_feats,
-                )
-                sample_out["sample"] = massaged_sample
+            # Note: Massaging not implemented for NoiseSearchInference as it uses complex multi-sample logic
             return sample_out  # Return the full dict with sample, score, method
         else:
-            # Apply massaging if enabled for non-dict returns
-            massage_steps = self.config.get("massage_steps", 3)
-            if massage_steps > 0:
-                # Add batch dimension back for massaging
-                sample_feats = tree.map_structure(
-                    lambda x: x[None] if x is not None and x.ndim > 0 else x, sample_out
-                )
-                sample_feats = self.massage_sample(sample_feats, massage_steps)
-                # Remove batch dimension again
-                sample_out = tree.map_structure(
-                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x,
-                    sample_feats,
-                )
+            # Note: Massaging not implemented for NoiseSearchInference as it uses complex multi-sample logic
             return sample_out
 
     def _noise_search_sde(
@@ -1933,30 +1907,22 @@ class SDESimpleInference(InferenceMethod):
             lambda x: x[None].to(self.sampler.device), init_feats
         )
 
+        # Get massage_steps parameter
+        massage_steps = self.config.get("massage_steps", 3)
+
         # Run simple SDE sampling
-        sample_out = self._simple_sde_inference(init_feats, noise_scale, context)
+        sample_out = self._simple_sde_inference(
+            init_feats, noise_scale, context, massage_steps
+        )
 
         # Remove batch dimension like _base_sample does
         sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
 
-        # Apply massaging if enabled
-        massage_steps = self.config.get("massage_steps", 3)
-        if massage_steps > 0:
-            # Add batch dimension back for massaging
-            sample_feats = tree.map_structure(
-                lambda x: x[None] if x is not None and x.ndim > 0 else x, sample_result
-            )
-            sample_feats = self.massage_sample(sample_feats, massage_steps)
-            # Remove batch dimension again
-            sample_result = tree.map_structure(
-                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_feats
-            )
-
         return sample_result
 
-    def _simple_sde_inference(self, data_init, noise_scale, context):
+    def _simple_sde_inference(self, data_init, noise_scale, context, massage_steps=0):
         """Simple SDE sampling with noise at every step."""
         sample_feats = tree.map_structure(
             lambda x: x.clone() if torch.is_tensor(x) else x.copy(), data_init
@@ -2053,6 +2019,20 @@ class SDESimpleInference(InferenceMethod):
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
 
+        # Apply massaging if enabled
+        if massage_steps > 0:
+            self._log.info(f"Applying massaging with {massage_steps} steps")
+            sample_feats = self.massage_sample(sample_feats, massage_steps)
+
+            # Recompute final outputs with massaged features
+            final_psi_pred = self.sampler.model(sample_feats)["psi"]
+            atom37_final = all_atom.compute_backbone(
+                ru.Rigid.from_tensor_7(sample_feats["rigids_t"]), final_psi_pred
+            )[0]
+            # Replace the last trajectory point with massaged result
+            all_bb_prots[-1] = du.move_to_np(atom37_final)
+            all_rigids[-1] = du.move_to_np(sample_feats["rigids_t"])
+
         # Flip trajectory so that it starts from t=0
         flip = lambda x: np.flip(np.stack(x), (0,))
         all_bb_prots = flip(all_bb_prots)
@@ -2115,6 +2095,9 @@ class DivFreeMaxSimpleInference(InferenceMethod):
             lambda x: x[None].to(self.sampler.device), init_feats
         )
 
+        # Get massage_steps parameter
+        massage_steps = self.config.get("massage_steps", 3)
+
         # Run simple divergence-free max sampling
         sample_out = self._base_sample_divfree_max(
             init_feats,
@@ -2122,25 +2105,13 @@ class DivFreeMaxSimpleInference(InferenceMethod):
             particle_repulsion_factor,
             noise_schedule_end_factor,
             context,
+            massage_steps,
         )
 
         # Remove batch dimension like _base_sample does
         sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
-
-        # Apply massaging if enabled
-        massage_steps = self.config.get("massage_steps", 3)
-        if massage_steps > 0:
-            # Add batch dimension back for massaging
-            sample_feats = tree.map_structure(
-                lambda x: x[None] if x is not None and x.ndim > 0 else x, sample_result
-            )
-            sample_feats = self.massage_sample(sample_feats, massage_steps)
-            # Remove batch dimension again
-            sample_result = tree.map_structure(
-                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_feats
-            )
 
         return sample_result
 
@@ -2151,6 +2122,7 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         particle_repulsion_factor,
         noise_schedule_end_factor,
         context=None,
+        massage_steps=0,
     ):
         """Synchronized divergence-free max sampling for proper particle guidance."""
         device = init_feats["rigids_t"].device
@@ -2360,6 +2332,20 @@ class DivFreeMaxSimpleInference(InferenceMethod):
                 atom37_t = all_atom.compute_backbone(rigids_t, psi_pred)[0]
                 all_bb_prots.append(du.move_to_np(atom37_t))
                 final_psi_pred = psi_pred
+
+        # Apply massaging if enabled
+        if massage_steps > 0:
+            self._log.info(f"Applying massaging with {massage_steps} steps")
+            sample_feats = self.massage_sample(sample_feats, massage_steps)
+
+            # Recompute final outputs with massaged features
+            final_psi_pred = self.sampler.model(sample_feats)["psi"]
+            atom37_final = all_atom.compute_backbone(
+                ru.Rigid.from_tensor_7(sample_feats["rigids_t"]), final_psi_pred
+            )[0]
+            # Replace the last trajectory point with massaged result
+            all_bb_prots[-1] = du.move_to_np(atom37_final)
+            all_rigids[-1] = du.move_to_np(sample_feats["rigids_t"])
 
         # Flip trajectories to correct time order
         flip = lambda x: np.flip(np.stack(x), (0,))
