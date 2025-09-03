@@ -698,14 +698,14 @@ def main():
     parser.add_argument(
         "--sde_noise_scale",
         type=float,
-        default=0,
+        default=0.2,
         help="Noise scale for SDE simple method (default: 0.05)",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0,
+        default=0.2,
         help="Lambda for divergence-free max method (default: 0.2)",
     )
 
