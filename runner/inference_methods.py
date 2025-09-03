@@ -54,6 +54,16 @@ class InferenceMethod(ABC):
         """
         device = sample_feats["rigids_t"].device
         min_t = self.sampler._fm_conf.min_t
+        num_t = self.sampler._fm_conf.num_t
+
+        # Calculate the final sampling timestep (min_t is where sampling ends, not where we sample)
+        reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+        dt = (
+            reverse_steps[0] - reverse_steps[1]
+            if len(reverse_steps) > 1
+            else 1.0 / num_t
+        )
+        final_sampling_timestep = min_t + dt
 
         # Ensure we have batch dimension
         if sample_feats["rigids_t"].ndim == 2:
@@ -68,14 +78,14 @@ class InferenceMethod(ABC):
         )
 
         self._log.info(
-            f"Massaging sample with {num_steps} steps at final timestep t={min_t:.4f}"
+            f"Massaging sample with {num_steps} steps at final sampling timestep t={final_sampling_timestep:.4f}"
         )
 
         with torch.no_grad():
             for step in range(num_steps):
-                # Set timestep to final timestep (min_t)
+                # Set timestep to final sampling timestep
                 massaged_feats = self.sampler.exp._set_t_feats(
-                    massaged_feats, min_t, t_placeholder
+                    massaged_feats, final_sampling_timestep, t_placeholder
                 )
 
                 # Run model inference
@@ -95,21 +105,12 @@ class InferenceMethod(ABC):
                     "res_mask"
                 ]
 
-                # Use normal dt size
-                num_t = self.sampler._fm_conf.num_t
-                reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
-                dt = (
-                    reverse_steps[0] - reverse_steps[1]
-                    if len(reverse_steps) > 1
-                    else 1.0 / num_t
-                )
-
                 rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
                     rigid_t=ru.Rigid.from_tensor_7(massaged_feats["rigids_t"]),
                     rot_vectorfield=du.move_to_np(rot_vectorfield),
                     trans_vectorfield=du.move_to_np(trans_vectorfield),
                     flow_mask=du.move_to_np(flow_mask),
-                    t=min_t,
+                    t=final_sampling_timestep,
                     dt=dt,
                     center=True,
                     noise_scale=0.0,  # No noise during massaging
