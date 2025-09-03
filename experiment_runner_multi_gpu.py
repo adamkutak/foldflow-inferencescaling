@@ -665,14 +665,14 @@ def main():
     parser.add_argument(
         "--noise_scale",
         type=float,
-        default=0.3,
+        default=0.2,
         help="Noise scale for SDE path exploration",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.6,
+        default=0.3,
         help="Lambda for divergence-free vector fields",
     )
 
@@ -686,7 +686,7 @@ def main():
     parser.add_argument(
         "--particle_repulsion_factor",
         type=float,
-        default=0.02,
+        default=0,
         help="Particle repulsion factor for divergence-free max methods",
     )
 
@@ -700,7 +700,7 @@ def main():
     parser.add_argument(
         "--massage_steps",
         type=int,
-        default=3,
+        default=0,
         help="Number of massage steps for sample cleanup",
     )
 
@@ -708,7 +708,7 @@ def main():
         "--gpu_ids",
         type=int,
         nargs="+",
-        default=[2, 3, 4, 5],
+        default=[0, 1, 2, 3, 4],
         help="List of GPU IDs to use for concurrent experiments (default: [2, 3, 4, 5])",
     )
 
@@ -723,7 +723,7 @@ def main():
         "--branch_counts",
         type=int,
         nargs="+",
-        default=[2, 4, 8],
+        default=[1, 2, 4, 8],
         help="List of branch counts to use for experiments (default: [2, 4, 8])",
     )
 
