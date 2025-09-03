@@ -2902,11 +2902,6 @@ class SDESimpleInference(InferenceMethod):
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
 
-        # Calculate and log self-consistency score
-        self._calculate_and_log_self_consistency(
-            sample_result, sample_length, "SDE Simple"
-        )
-
         return sample_result
 
     def _simple_sde_inference(self, data_init, noise_scale, context):
@@ -3046,11 +3041,6 @@ class DivergenceFreeSimpleInference(InferenceMethod):
         # Remove batch dimension like _base_sample does
         sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
-        )
-
-        # Calculate and log self-consistency score
-        self._calculate_and_log_self_consistency(
-            sample_result, sample_length, "DivergenceFree Simple"
         )
 
         return sample_result
@@ -3198,11 +3188,6 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         # Remove batch dimension like _base_sample does
         sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
-        )
-
-        # Calculate and log self-consistency score
-        self._calculate_and_log_self_consistency(
-            sample_result, sample_length, "DivFreeMax Simple"
         )
 
         return sample_result
