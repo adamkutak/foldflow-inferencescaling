@@ -63,7 +63,7 @@ inference:
     # "random_search_divfree": RandomSearchDivFreeInference,
 
     # Inference method configuration
-    inference_method: "divfree_max_simple"
+    inference_method: "sde_simple"
     
     # Method-specific configuration
     method_config:
