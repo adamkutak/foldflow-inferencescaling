@@ -736,9 +736,16 @@ class NoiseSearchInference(InferenceMethod):
             )
         elif noise_type == "divfree":
             lambda_div = self.config.get("lambda_div", 0.2)
+            noise_schedule_end_factor = self.config.get(
+                "noise_schedule_end_factor", 1.0
+            )
             self._log.info(
                 f"Running Noise Search DivFree with {num_branches} branches, keeping {num_keep}, {num_rounds} rounds"
             )
+            if noise_schedule_end_factor != 1.0:
+                self._log.info(
+                    f"  Using noise schedule with end factor: {noise_schedule_end_factor}"
+                )
         elif noise_type == "divfree_max":
             lambda_div = self.config.get("lambda_div", 0.2)
             particle_repulsion_factor = self.config.get(
@@ -804,8 +811,8 @@ class NoiseSearchInference(InferenceMethod):
                 num_branches,
                 num_keep,
                 lambda_div,
-                None,
-                None,
+                0.0,  # No particle repulsion for regular divfree
+                noise_schedule_end_factor,  # Now supports noise scheduling
                 selector,
                 sample_length,
                 num_rounds,
@@ -1386,7 +1393,7 @@ class NoiseSearchInference(InferenceMethod):
                 trans_vecs = rigid_obj.get_trans()
 
                 if noise_type == "divfree":
-                    # Standard divergence-free noise
+                    # Standard divergence-free noise with optional linear noise scheduling
                     rot_divfree_noise = divfree_swirl_si(
                         rot_mats, t_batch, None, rot_vectorfield
                     )
@@ -1394,10 +1401,31 @@ class NoiseSearchInference(InferenceMethod):
                         trans_vecs, t_batch, None, trans_vectorfield
                     )
 
+                    # Apply time-dependent noise scaling if specified
+                    if noise_schedule_end_factor != 1.0:
+                        t_scalar = t_batch[0].item()
+                        normalized_time = (1.0 - t_scalar) / (1.0 - min_t)
+                        noise_scale_factor = (
+                            1.0 + (noise_schedule_end_factor - 1.0) * normalized_time
+                        )
+                        effective_lambda_div = lambda_div * noise_scale_factor
+                        # Debug logging for noise scheduling
+                        if (
+                            t_scalar in [1.0, 0.5, min_t]
+                            or abs(t_scalar - min_t) < 0.01
+                        ):
+                            self._log.debug(
+                                f"    Noise schedule at t={t_scalar:.3f}: factor={noise_scale_factor:.3f}, lambda={effective_lambda_div:.3f}"
+                            )
+                    else:
+                        effective_lambda_div = lambda_div
+
                     # Add divergence-free noise to vector fields
-                    rot_vectorfield = rot_vectorfield + lambda_div * rot_divfree_noise
+                    rot_vectorfield = (
+                        rot_vectorfield + effective_lambda_div * rot_divfree_noise
+                    )
                     trans_vectorfield = (
-                        trans_vectorfield + lambda_div * trans_divfree_noise
+                        trans_vectorfield + effective_lambda_div * trans_divfree_noise
                     )
 
                 elif noise_type == "divfree_max":
