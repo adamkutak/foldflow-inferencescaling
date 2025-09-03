@@ -385,12 +385,18 @@ class Sampler:
         esmf_dir = os.path.join(decoy_pdb_dir, "esmf")
         os.makedirs(esmf_dir, exist_ok=True)
         fasta_seqs = fasta.FastaFile.read(mpnn_fasta_path)
-        sample_feats = du.parse_pdb_feats("sample", reference_pdb_path)
+        # Get coordinate scaling factor from config to ensure consistent units
+        coord_scale_factor = self._conf.flow_matcher.r3.coordinate_scaling
+        sample_feats = du.parse_pdb_feats(
+            "sample", reference_pdb_path, scale_factor=coord_scale_factor
+        )
         for i, (header, string) in enumerate(fasta_seqs.items()):
             # Run ESMFold
             esmf_sample_path = os.path.join(esmf_dir, f"sample_{i}.pdb")
             _ = self.run_folding(string, esmf_sample_path)
-            esmf_feats = du.parse_pdb_feats("folded_sample", esmf_sample_path)
+            esmf_feats = du.parse_pdb_feats(
+                "folded_sample", esmf_sample_path, scale_factor=coord_scale_factor
+            )
             sample_seq = du.aatype_to_seq(sample_feats["aatype"])
 
             # Calculate scTM of ESMFold outputs with reference protein
