@@ -3,10 +3,11 @@
 Multi-GPU experiment runner for comparing inference scaling methods in protein design.
 
 This script runs experiments concurrently on multiple GPUs to compare different inference methods:
-- Standard sampling (baseline)
-- Best-of-N sampling
-- SDE path exploration
-- Divergence-free ODE path exploration
+- Standard inference method (baseline)
+- Random search/best-of-N sampling
+- Noise search (divergence free max)
+- Noise search (sde)
+- Random search + noise search (divergence free max)
 
 Each method is tested with different computational budgets (number of branches)
 to evaluate inference time scaling performance.
@@ -359,58 +360,10 @@ class MultiGPUExperimentRunner:
         """Run all experiments with different methods and branch counts using multiple GPUs."""
         experiments = []
 
-        # 1. Baseline: Standard sampling
+        # 1. Standard inference method
         experiments.append({"method": "standard", "config": {}})
 
-        # Random Search + Divergence-free ODE with different branch counts
-        for n_branches in self.args.branch_counts:
-            experiments.append(
-                {
-                    "method": "random_search_divfree",
-                    "config": {
-                        "num_branches": n_branches,
-                        "num_keep": 1,  # Always keep only 1 as specified
-                        "lambda_div": self.args.lambda_div,
-                        "selector": self.args.scoring_function,
-                        "branch_start_time": 0.0,
-                        "branch_interval": self.args.branch_interval,
-                    },
-                }
-            )
-
-        # SDE path exploration with different branch counts
-        for n_branches in self.args.branch_counts:
-            experiments.append(
-                {
-                    "method": "sde_path_exploration",
-                    "config": {
-                        "num_branches": n_branches,
-                        "num_keep": 1,  # Always keep only 1 as specified
-                        "noise_scale": self.args.noise_scale,
-                        "selector": self.args.scoring_function,
-                        "branch_start_time": 0.0,
-                        "branch_interval": self.args.branch_interval,
-                    },
-                }
-            )
-
-        # Divergence-free ODE with different branch counts
-        for n_branches in self.args.branch_counts:
-            experiments.append(
-                {
-                    "method": "divergence_free_ode",
-                    "config": {
-                        "num_branches": n_branches,
-                        "num_keep": 1,  # Always keep only 1 as specified
-                        "lambda_div": self.args.lambda_div,
-                        "selector": self.args.scoring_function,
-                        "branch_start_time": 0.0,
-                        "branch_interval": self.args.branch_interval,
-                    },
-                }
-            )
-
-        # Best-of-N with different N values
+        # 2. Random search/best-of-N with different branch counts
         for n_branches in self.args.branch_counts:
             experiments.append(
                 {
@@ -418,6 +371,59 @@ class MultiGPUExperimentRunner:
                     "config": {
                         "num_branches": n_branches,
                         "selector": self.args.scoring_function,
+                    },
+                }
+            )
+
+        # 3. Noise search (divergence free max) with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "noise_search_divfree_max",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": 1,
+                        "num_rounds": self.args.num_rounds,
+                        "lambda_div": self.args.lambda_div,
+                        "particle_repulsion_factor": self.args.particle_repulsion_factor,
+                        "noise_schedule_end_factor": self.args.noise_schedule_end_factor,
+                        "selector": self.args.scoring_function,
+                        "massage_steps": self.args.massage_steps,
+                    },
+                }
+            )
+
+        # 4. Noise search (sde) with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "noise_search_sde",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": 1,
+                        "num_rounds": self.args.num_rounds,
+                        "noise_scale": self.args.noise_scale,
+                        "selector": self.args.scoring_function,
+                        "massage_steps": self.args.massage_steps,
+                    },
+                }
+            )
+
+        # 5. Random search + noise search (divergence free max) with different branch counts
+        for n_branches in self.args.branch_counts:
+            experiments.append(
+                {
+                    "method": "random_search_noise",
+                    "config": {
+                        "num_branches": n_branches,
+                        "num_keep": 1,
+                        "num_rounds": self.args.num_rounds,
+                        "noise_type": "divfree_max",
+                        "lambda_div": self.args.lambda_div,
+                        "particle_repulsion_factor": self.args.particle_repulsion_factor,
+                        "noise_schedule_end_factor": self.args.noise_schedule_end_factor,
+                        "selector": self.args.scoring_function,
+                        "massage_steps": self.args.massage_steps,
                     },
                 }
             )
@@ -671,10 +677,31 @@ def main():
     )
 
     parser.add_argument(
-        "--branch_interval",
+        "--num_rounds",
+        type=int,
+        default=9,
+        help="Number of rounds for noise search methods",
+    )
+
+    parser.add_argument(
+        "--particle_repulsion_factor",
         type=float,
-        default=0.1,
-        help="Time interval between branches (0.0 = every timestep, 0.1 = every 0.1 time units)",
+        default=0.02,
+        help="Particle repulsion factor for divergence-free max methods",
+    )
+
+    parser.add_argument(
+        "--noise_schedule_end_factor",
+        type=float,
+        default=0.7,
+        help="Noise schedule end factor for divergence-free max methods",
+    )
+
+    parser.add_argument(
+        "--massage_steps",
+        type=int,
+        default=3,
+        help="Number of massage steps for sample cleanup",
     )
 
     parser.add_argument(
@@ -682,7 +709,7 @@ def main():
         type=int,
         nargs="+",
         default=[2, 3, 4, 5],
-        help="List of GPU IDs to use for concurrent experiments (default: [0, 1, 2])",
+        help="List of GPU IDs to use for concurrent experiments (default: [2, 3, 4, 5])",
     )
 
     parser.add_argument(
@@ -708,8 +735,11 @@ def main():
     print(f"  Sample length: {args.sample_length}")
     print(f"  Scoring function: {args.scoring_function}")
     print(f"  Noise scale (SDE): {args.noise_scale}")
-    print(f"  Lambda div (ODE): {args.lambda_div}")
-    print(f"  Branch interval: {args.branch_interval}")
+    print(f"  Lambda div: {args.lambda_div}")
+    print(f"  Num rounds: {args.num_rounds}")
+    print(f"  Particle repulsion factor: {args.particle_repulsion_factor}")
+    print(f"  Noise schedule end factor: {args.noise_schedule_end_factor}")
+    print(f"  Massage steps: {args.massage_steps}")
     print(f"  GPU IDs: {args.gpu_ids}")
     print(f"  Branch counts: {args.branch_counts}")
     print()

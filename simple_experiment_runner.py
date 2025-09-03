@@ -714,7 +714,7 @@ def main():
     parser.add_argument(
         "--particle_repulsion_factor",
         type=float,
-        default=0.02,
+        default=0,
         help="Particle repulsion factor for DivFree Max (default: 0.02)",
     )
 
@@ -728,7 +728,7 @@ def main():
     parser.add_argument(
         "--massage_steps",
         type=int,
-        default=1,
+        default=0,
         help="Number of massaging steps to clean up noisy samples (default: 3, 0 to disable)",
     )
 
