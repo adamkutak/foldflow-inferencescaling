@@ -40,6 +40,86 @@ class InferenceMethod(ABC):
         """Generate a sample using this inference method."""
         pass
 
+    def massage_sample(
+        self, sample_feats: Dict[str, Any], num_steps: int = 3
+    ) -> Dict[str, Any]:
+        """Universal massaging function to clean up samples with additional inference steps.
+
+        Args:
+            sample_feats: The completed sample features from sampling
+            num_steps: Number of additional inference steps to run (default: 3)
+
+        Returns:
+            The massaged sample features
+        """
+        device = sample_feats["rigids_t"].device
+        min_t = self.sampler._fm_conf.min_t
+
+        # Ensure we have batch dimension
+        if sample_feats["rigids_t"].ndim == 2:
+            t_placeholder = torch.ones((1,)).to(device)
+        else:
+            t_placeholder = torch.ones((sample_feats["rigids_t"].shape[0],)).to(device)
+
+        # Make a copy to avoid modifying the original
+        massaged_feats = tree.map_structure(
+            lambda x: x.clone() if torch.is_tensor(x) else copy.deepcopy(x),
+            sample_feats,
+        )
+
+        self._log.info(
+            f"Massaging sample with {num_steps} steps at final timestep t={min_t:.4f}"
+        )
+
+        with torch.no_grad():
+            for step in range(num_steps):
+                # Set timestep to final timestep (min_t)
+                massaged_feats = self.sampler.exp._set_t_feats(
+                    massaged_feats, min_t, t_placeholder
+                )
+
+                # Run model inference
+                model_out = self.sampler.model(massaged_feats)
+
+                rot_vectorfield = model_out["rot_vectorfield"]
+                trans_vectorfield = model_out["trans_vectorfield"]
+                rigid_pred = model_out["rigids"]
+
+                # Update self-conditioning if enabled
+                if self.sampler.exp._model_conf.embed.embed_self_conditioning:
+                    massaged_feats["sc_ca_t"] = rigid_pred[..., 4:]
+
+                # Apply flow matching step with no noise (noise_scale=0)
+                fixed_mask = massaged_feats["fixed_mask"] * massaged_feats["res_mask"]
+                flow_mask = (1 - massaged_feats["fixed_mask"]) * massaged_feats[
+                    "res_mask"
+                ]
+
+                # Use normal dt size
+                num_t = self.sampler._fm_conf.num_t
+                reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
+                dt = (
+                    reverse_steps[0] - reverse_steps[1]
+                    if len(reverse_steps) > 1
+                    else 1.0 / num_t
+                )
+
+                rots_t, trans_t, rigids_t = self.sampler.flow_matcher.reverse(
+                    rigid_t=ru.Rigid.from_tensor_7(massaged_feats["rigids_t"]),
+                    rot_vectorfield=du.move_to_np(rot_vectorfield),
+                    trans_vectorfield=du.move_to_np(trans_vectorfield),
+                    flow_mask=du.move_to_np(flow_mask),
+                    t=min_t,
+                    dt=dt,
+                    center=True,
+                    noise_scale=0.0,  # No noise during massaging
+                )
+
+                massaged_feats["rigids_t"] = rigids_t.to_tensor_7().to(device)
+
+        self._log.info("Sample massaging completed")
+        return massaged_feats
+
     def get_score_function(self, selector: str = "tm_score") -> Callable:
         """Get the scoring function based on selector."""
         if selector == "tm_score":
@@ -673,8 +753,36 @@ class NoiseSearchInference(InferenceMethod):
 
         # Extract the actual sample from the result dict and remove batch dimension
         if isinstance(sample_out, dict) and "sample" in sample_out:
+            # Apply massaging if enabled
+            massage_steps = self.config.get("massage_steps", 3)
+            if massage_steps > 0:
+                # Add batch dimension back for massaging
+                sample_feats = tree.map_structure(
+                    lambda x: x[None] if x is not None and x.ndim > 0 else x,
+                    sample_out["sample"],
+                )
+                sample_feats = self.massage_sample(sample_feats, massage_steps)
+                # Remove batch dimension again and update the result
+                massaged_sample = tree.map_structure(
+                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x,
+                    sample_feats,
+                )
+                sample_out["sample"] = massaged_sample
             return sample_out  # Return the full dict with sample, score, method
         else:
+            # Apply massaging if enabled for non-dict returns
+            massage_steps = self.config.get("massage_steps", 3)
+            if massage_steps > 0:
+                # Add batch dimension back for massaging
+                sample_feats = tree.map_structure(
+                    lambda x: x[None] if x is not None and x.ndim > 0 else x, sample_out
+                )
+                sample_feats = self.massage_sample(sample_feats, massage_steps)
+                # Remove batch dimension again
+                sample_out = tree.map_structure(
+                    lambda x: x[:, 0] if x is not None and x.ndim > 1 else x,
+                    sample_feats,
+                )
             return sample_out
 
     def _noise_search_sde(
@@ -1833,6 +1941,19 @@ class SDESimpleInference(InferenceMethod):
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
 
+        # Apply massaging if enabled
+        massage_steps = self.config.get("massage_steps", 3)
+        if massage_steps > 0:
+            # Add batch dimension back for massaging
+            sample_feats = tree.map_structure(
+                lambda x: x[None] if x is not None and x.ndim > 0 else x, sample_result
+            )
+            sample_feats = self.massage_sample(sample_feats, massage_steps)
+            # Remove batch dimension again
+            sample_result = tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_feats
+            )
+
         return sample_result
 
     def _simple_sde_inference(self, data_init, noise_scale, context):
@@ -2007,6 +2128,19 @@ class DivFreeMaxSimpleInference(InferenceMethod):
         sample_result = tree.map_structure(
             lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_out
         )
+
+        # Apply massaging if enabled
+        massage_steps = self.config.get("massage_steps", 3)
+        if massage_steps > 0:
+            # Add batch dimension back for massaging
+            sample_feats = tree.map_structure(
+                lambda x: x[None] if x is not None and x.ndim > 0 else x, sample_result
+            )
+            sample_feats = self.massage_sample(sample_feats, massage_steps)
+            # Remove batch dimension again
+            sample_result = tree.map_structure(
+                lambda x: x[:, 0] if x is not None and x.ndim > 1 else x, sample_feats
+            )
 
         return sample_result
 
