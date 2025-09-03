@@ -686,7 +686,7 @@ def main():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=32,
+        default=64,
         help="Number of samples to generate per method (default: 32)",
     )
 
