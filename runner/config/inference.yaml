@@ -13,7 +13,7 @@ flow_matcher:
 
 inference:
   name: null
-  gpu_id: 1  # CUDA GPU to use
+  gpu_id: 4  # CUDA GPU to use
   seed: 123
   full_ckpt_dir: ./ckpt/baseline/
 
@@ -61,9 +61,10 @@ inference:
     # "divergence_free_simple": DivergenceFreeSimpleInference,
     # "divfree_max_simple": DivFreeMaxSimpleInference,
     # "random_search_divfree": RandomSearchDivFreeInference,
+    # "random_search_noise": RandomSearchNoiseInference,
 
     # Inference method configuration
-    inference_method: "sde_simple"
+    inference_method: "random_search_noise"
     
     # Method-specific configuration
     method_config:
@@ -85,6 +86,9 @@ inference:
       lambda_div: 0.3
       particle_repulsion_factor: 0.02
       noise_schedule_end_factor: 0.7
+
+      # random search + noise search configuration
+      noise_type: "divfree_max"
       
       # SDE Path Exploration configuration (when using sde_path_exploration)
       # num_branches: 4  # Number of branches per step
