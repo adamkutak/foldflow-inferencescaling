@@ -698,7 +698,7 @@ def main():
     parser.add_argument(
         "--sde_noise_scale",
         type=float,
-        default=0.2,
+        default=0.4,
         help="Noise scale for SDE simple method (default: 0.05)",
     )
 
