@@ -707,14 +707,14 @@ def main():
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0,
+        default=0.2,
         help="Lambda for divergence-free max method (default: 0.2)",
     )
 
     parser.add_argument(
         "--particle_repulsion_factor",
         type=float,
-        default=0,
+        default=0.02,
         help="Particle repulsion factor for DivFree Max (default: 0.02)",
     )
 
