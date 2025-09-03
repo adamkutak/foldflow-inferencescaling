@@ -7,9 +7,9 @@ defaults:
 experiment:
   eval_dir: ./ # if None the evaluation won't be saved.
 
-# flow_matcher:
-#   so3:
-#     inference_scaling: 10.0
+flow_matcher:
+  so3:
+    inference_scaling: 10.0
 
 inference:
   name: null
