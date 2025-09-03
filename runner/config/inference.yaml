@@ -51,16 +51,11 @@ inference:
     # list of methods:
     # "standard": StandardInference,
     # "best_of_n": BestOfNInference,
-    # "sde_path_exploration": SDEPathExplorationInference,
-    # "divergence_free_ode": DivergenceFreeODEInference,
-    # "divergence_free_max": DivergenceFreeMaxInference,
     # "noise_search_sde": NoiseSearchSDEInference,
     # "noise_search_divfree": NoiseSearchDivFreeInference,
     # "noise_search_divfree_max": NoiseSearchDivFreeMaxInference,
     # "sde_simple": SDESimpleInference,
-    # "divergence_free_simple": DivergenceFreeSimpleInference,
     # "divfree_max_simple": DivFreeMaxSimpleInference,
-    # "random_search_divfree": RandomSearchDivFreeInference,
     # "random_search_noise": RandomSearchNoiseInference,
 
     # Inference method configuration
@@ -68,7 +63,7 @@ inference:
     
     # Method-specific configuration
     method_config:
-      selector: "tm_score_4seq"  # Scoring function
+      selector: "tm_score"  # Scoring function
       
       # Sample massaging configuration (applies to all noising methods)
       massage_steps: 0  # Number of additional inference steps to clean up noisy samples (0 to disable)
@@ -86,7 +81,7 @@ inference:
       noise_scale: 0.05  # Scale of noise for SDE
       
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
-      lambda_div: 0.3
+      lambda_div: 0.2
       particle_repulsion_factor: 0
       noise_schedule_end_factor: 0.7
 
