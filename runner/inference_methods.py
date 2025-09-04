@@ -979,7 +979,7 @@ class NoiseSearchInference(InferenceMethod):
             # Initial self-conditioning if enabled
             if (
                 self.sampler.exp._model_conf.embed.embed_self_conditioning
-                and simulation_steps
+                and len(simulation_steps) > 0
             ):
                 sample_feats = self.sampler.exp._set_t_feats(
                     sample_feats, simulation_steps[0], t_placeholder
@@ -1340,7 +1340,7 @@ class NoiseSearchInference(InferenceMethod):
             # Initial self-conditioning if enabled
             if (
                 self.sampler.exp._model_conf.embed.embed_self_conditioning
-                and simulation_steps
+                and len(simulation_steps) > 0
             ):
                 sample_feats = self.sampler.exp._set_t_feats(
                     sample_feats, simulation_steps[0], t_placeholder
