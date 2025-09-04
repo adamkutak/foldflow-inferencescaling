@@ -260,8 +260,17 @@ class InferenceMethod(ABC):
     ) -> float:
         """Evaluate sample using fast geometric validation metrics only.
 
-        PRINCIPLED APPROACH: Use the exact same coordinate processing pipeline
-        as the training evaluation (eval_fn) to ensure consistency.
+        CRITICAL FIX APPLIED: This function now uses the exact same coordinate
+        processing pipeline as the training evaluation (eval_fn) to ensure consistency.
+
+        KEY CHANGES:
+        1. Uses prot_traj[0] instead of prot_traj[-1] to get final structure
+           (after trajectory flipping, index [0] contains the final refined structure)
+        2. Applies proper residue masking like eval_fn
+        3. Uses masked coordinates throughout the evaluation pipeline
+
+        This fixes the fundamental issue where we were evaluating the initial noisy
+        structure instead of the final refined structure.
 
         Returns a composite score where higher values indicate better geometry.
         """
@@ -286,29 +295,50 @@ class InferenceMethod(ABC):
             )
             pdb_path = traj_paths["sample_path"]
 
-            # PRINCIPLED FIX: Use the exact same approach as training evaluation
+            # CRITICAL FIX: Use the exact same approach as training evaluation
             # Extract final coordinates (same as eval_fn: final_prot = infer_out["prot_traj"][0])
-            final_coords = sample_output["prot_traj"][-1]  # Final structure [N, 37, 3]
+            # After trajectory flipping in inference_fn, index [0] contains the final structure (t=min_t)
+            final_coords = sample_output["prot_traj"][0]  # Final structure [N, 37, 3]
 
-            # Debug coordinate values before processing
-            ca_pos_raw = final_coords[:sample_length, 1, :]  # C-alpha coordinates
+            # For comparison, also get the initial structure to show the difference
+            initial_coords = sample_output["prot_traj"][
+                -1
+            ]  # Initial structure [N, 37, 3]
+
+            # Debug coordinate values to show the fix
+            ca_pos_final = final_coords[
+                :sample_length, 1, :
+            ]  # C-alpha coordinates (final)
+            ca_pos_initial = initial_coords[
+                :sample_length, 1, :
+            ]  # C-alpha coordinates (initial)
+
             self._log.info(
-                f"_geometric_score_function: Raw CA coordinate range: [{ca_pos_raw.min():.3f}, {ca_pos_raw.max():.3f}]"
+                f"_geometric_score_function: BEFORE FIX would use prot_traj[-1] (initial): CA range [{ca_pos_initial.min():.3f}, {ca_pos_initial.max():.3f}]"
+            )
+            self._log.info(
+                f"_geometric_score_function: AFTER FIX now uses prot_traj[0] (final): CA range [{ca_pos_final.min():.3f}, {ca_pos_final.max():.3f}]"
             )
 
+            # Apply proper residue masking (same as eval_fn)
+            # In inference methods, we don't have padding, so res_mask is all ones
+            res_mask = np.ones(sample_length, dtype=bool)
+            final_coords_masked = final_coords[:sample_length][
+                res_mask
+            ]  # Apply masking like eval_fn
+
             # Create dummy ground truth (not used for geometric metrics, only for TM score)
-            dummy_gt_coords = np.zeros_like(final_coords[:sample_length])
+            dummy_gt_coords = np.zeros_like(final_coords_masked)
             dummy_gt_aatype = np.zeros(sample_length, dtype=np.int32)
             flow_mask = np.ones(sample_length)  # All residues are "flowed"
 
             # Use our streamlined geometric_metrics_only function (same pipeline, no TM score)
             try:
-                sample_metrics = self._geometric_metrics_only(
+                sample_metrics = self._unified_evaluation_metrics(
                     pdb_path=pdb_path,
-                    atom37_pos=final_coords[
-                        :sample_length
-                    ],  # Raw inference coordinates
+                    atom37_pos=final_coords_masked,  # Use masked coordinates like eval_fn
                     flow_mask=flow_mask,
+                    selector="geometric",  # Only calculate geometric metrics
                 )
 
                 # Extract the geometric metrics we care about
@@ -320,15 +350,18 @@ class InferenceMethod(ABC):
                 rg = sample_metrics["radius_of_gyration"]
 
                 self._log.info(
-                    f"_geometric_score_function: Using geometric_metrics_only (same pipeline as training, no TM score)"
+                    f"_geometric_score_function: Using unified_evaluation_metrics with 'geometric' selector (same methodology as training)"
+                )
+                self._log.info(
+                    f"_geometric_score_function: FIXED - Now using prot_traj[0] (final structure) instead of prot_traj[-1] (initial structure)"
                 )
 
             except Exception as e:
                 self._log.error(
-                    f"_geometric_score_function: geometric_metrics_only failed: {e}"
+                    f"_geometric_score_function: unified_evaluation_metrics failed: {e}"
                 )
                 # Fallback to direct calculation
-                ca_pos = final_coords[:sample_length, 1, :]
+                ca_pos = final_coords_masked[:, 1, :]  # Use masked coordinates
                 ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
                 num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
                     ca_pos
@@ -383,57 +416,108 @@ class InferenceMethod(ABC):
                 except:
                     pass
 
-    def _geometric_metrics_only(self, *, pdb_path, atom37_pos, flow_mask):
+    def _unified_evaluation_metrics(
+        self,
+        *,
+        pdb_path,
+        atom37_pos,
+        flow_mask,
+        selector,
+        gt_atom37_pos=None,
+        gt_aatype=None,
+    ):
         """
-        Streamlined version of protein_metrics that only calculates geometric metrics.
+        Unified evaluation function that follows the exact same methodology as protein_metrics
+        but allows selective calculation of only the metrics we need.
 
-        This follows the exact same pipeline as metrics.protein_metrics but skips
-        the expensive TM score calculation, making it much faster for geometric scoring.
+        This ensures ALL our scoring functions use identical coordinate processing and
+        evaluation methodology as the original FoldFlow training evaluation.
 
         Args:
             pdb_path: Path to PDB file for secondary structure analysis
             atom37_pos: [N, 37, 3] atom positions from inference
             flow_mask: [N] mask of which residues are flowed
+            selector: Which metrics to calculate ("geometric", "tm_score", "rmsd", "all")
+            gt_atom37_pos: [N, 37, 3] ground truth positions (required for tm_score/rmsd)
+            gt_aatype: [N] ground truth amino acid types (required for tm_score)
 
         Returns:
-            Dict with geometric metrics (same keys as protein_metrics)
+            Dict with requested metrics (same structure as protein_metrics)
         """
         from tools.analysis import metrics
         from tools.analysis import utils as au
         from openfold.np.relax import amber_minimize
+        from foldflow.data import utils as du
         import tree
 
-        # Secondary structure analysis (same as protein_metrics)
-        mdtraj_metrics = metrics.calc_mdtraj_metrics(pdb_path)
+        metrics_dict = {}
 
-        # Atom mask and diffuse mask (same as protein_metrics)
+        # Always calculate basic masks (needed for all selectors)
         atom37_mask = np.any(atom37_pos, axis=-1)
         atom37_diffuse_mask = flow_mask[..., None] * atom37_mask
-
-        # Create protein for violation metrics (same as protein_metrics)
-        prot = au.create_full_prot(atom37_pos, atom37_diffuse_mask)
-        violation_metrics = amber_minimize.get_violation_metrics(prot)
-        struct_violations = violation_metrics["structural_violations"]
-        inter_violations = struct_violations["between_residues"]
-
-        # Geometry calculations (same as protein_metrics)
         bb_mask = np.any(atom37_mask, axis=-1)
-        ca_pos = atom37_pos[..., metrics.CA_IDX, :][bb_mask.astype(bool)]
-        ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
-        num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(ca_pos)
 
-        # Build metrics dict (same structure as protein_metrics, minus TM score)
-        metrics_dict = {
-            "ca_ca_bond_dev": ca_ca_bond_dev,
-            "ca_ca_valid_percent": ca_ca_valid_percent,
-            "ca_steric_clash_percent": ca_steric_clash_percent,
-            "num_ca_steric_clashes": num_ca_steric_clashes,
-            **mdtraj_metrics,
-        }
+        # Geometric metrics (needed for "geometric" and "all")
+        if selector in ["geometric", "all"]:
+            # Secondary structure analysis (same as protein_metrics)
+            mdtraj_metrics = metrics.calc_mdtraj_metrics(pdb_path)
 
-        # Add inter-violation metrics (same as protein_metrics)
-        for k in metrics.INTER_VIOLATION_METRICS:
-            metrics_dict[k] = inter_violations[k]
+            # Create protein for violation metrics (same as protein_metrics)
+            prot = au.create_full_prot(atom37_pos, atom37_diffuse_mask)
+            violation_metrics = amber_minimize.get_violation_metrics(prot)
+            struct_violations = violation_metrics["structural_violations"]
+            inter_violations = struct_violations["between_residues"]
+
+            # CA geometry calculations (same as protein_metrics)
+            ca_pos = atom37_pos[..., metrics.CA_IDX, :][bb_mask.astype(bool)]
+            ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
+            num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
+                ca_pos
+            )
+
+            # Add geometric metrics
+            metrics_dict.update(
+                {
+                    "ca_ca_bond_dev": ca_ca_bond_dev,
+                    "ca_ca_valid_percent": ca_ca_valid_percent,
+                    "ca_steric_clash_percent": ca_steric_clash_percent,
+                    "num_ca_steric_clashes": num_ca_steric_clashes,
+                    **mdtraj_metrics,
+                }
+            )
+
+            # Add inter-violation metrics (same as protein_metrics)
+            for k in metrics.INTER_VIOLATION_METRICS:
+                metrics_dict[k] = inter_violations[k]
+
+        # TM score and RMSD metrics (needed for "tm_score", "rmsd", or "all")
+        if selector in ["tm_score", "rmsd", "all"]:
+            if gt_atom37_pos is None or gt_aatype is None:
+                raise ValueError(
+                    f"gt_atom37_pos and gt_aatype required for selector '{selector}'"
+                )
+
+            # Extract positions for comparison (same as protein_metrics)
+            bb_diffuse_mask = (flow_mask * bb_mask).astype(bool)
+            unpad_gt_scaffold_pos = gt_atom37_pos[..., metrics.CA_IDX, :][
+                bb_diffuse_mask
+            ]
+            unpad_pred_scaffold_pos = atom37_pos[..., metrics.CA_IDX, :][
+                bb_diffuse_mask
+            ]
+            seq = du.aatype_to_seq(gt_aatype[bb_diffuse_mask])
+
+            if selector in ["tm_score", "all"]:
+                _, tm_score = metrics.calc_tm_score(
+                    unpad_pred_scaffold_pos, unpad_gt_scaffold_pos, seq, seq
+                )
+                metrics_dict["tm_score"] = tm_score
+
+            if selector in ["rmsd", "all"]:
+                rmsd = metrics.calc_aligned_rmsd(
+                    unpad_pred_scaffold_pos, unpad_gt_scaffold_pos
+                )
+                metrics_dict["rmsd"] = rmsd
 
         # Apply same tree mapping as protein_metrics
         metrics_dict = tree.map_structure(lambda x: np.mean(x).item(), metrics_dict)
