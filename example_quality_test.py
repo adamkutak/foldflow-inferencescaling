@@ -49,8 +49,8 @@ def create_sampler_config(method="standard", noise_param=0.0):
 
     # Set sampling parameters
     conf.inference.samples.samples_per_length = 1
-    conf.inference.samples.min_length = 50
-    conf.inference.samples.max_length = 50
+    conf.inference.samples.min_length = 100
+    conf.inference.samples.max_length = 100
     conf.inference.samples.length_step = 1
     conf.inference.output_dir = "example_output"
 
@@ -125,7 +125,7 @@ def run_quality_comparison():
             sampler = Sampler(conf)
 
             # Generate sample
-            sample_result = sampler.inference_method.sample(50)
+            sample_result = sampler.inference_method.sample(20)
 
             # Extract final structure
             final_structure = sample_result["prot_traj"][-1]
