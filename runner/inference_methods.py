@@ -905,9 +905,13 @@ class NoiseSearchInference(InferenceMethod):
                         best_overall_score = score
                         best_overall_sample = completed_sample
 
+            # Log top score for this round
+            round_scores_tensor = torch.tensor(round_scores)
+            top_round_score = torch.max(round_scores_tensor).item()
+            self._log.info(f"  Round {round_idx + 1} top score: {top_round_score:.4f}")
+
             # Select top-k samples for next round (if not the last round)
             if round_idx < num_rounds - 1:
-                round_scores_tensor = torch.tensor(round_scores)
                 top_k_indices = torch.topk(
                     round_scores_tensor, k=min(num_keep, len(round_samples))
                 )[1]
@@ -927,9 +931,6 @@ class NoiseSearchInference(InferenceMethod):
                 # Last round - just find the best sample
                 best_round_idx = np.argmax(round_scores)
                 best_round_score = round_scores[best_round_idx]
-                self._log.info(
-                    f"  Best sample in final round: score = {best_round_score:.4f}"
-                )
 
         self._log.info(f"NOISE SEARCH SDE COMPLETE")
         self._log.info(f"  Best overall score: {best_overall_score:.4f}")
@@ -1254,9 +1255,13 @@ class NoiseSearchInference(InferenceMethod):
                             best_overall_score = score
                             best_overall_sample = completed_sample
 
+            # Log top score for this round
+            round_scores_tensor = torch.tensor(round_scores)
+            top_round_score = torch.max(round_scores_tensor).item()
+            self._log.info(f"  Round {round_idx + 1} top score: {top_round_score:.4f}")
+
             # Select top-k samples for next round (if not the last round)
             if round_idx < num_rounds - 1:
-                round_scores_tensor = torch.tensor(round_scores)
                 top_k_indices = torch.topk(
                     round_scores_tensor, k=min(num_keep, len(round_samples))
                 )[1]
@@ -1276,9 +1281,6 @@ class NoiseSearchInference(InferenceMethod):
                 # Last round - just find the best sample
                 best_round_idx = np.argmax(round_scores)
                 best_round_score = round_scores[best_round_idx]
-                self._log.info(
-                    f"  Best sample in final round: score = {best_round_score:.4f}"
-                )
 
         self._log.info(f"{method_name} COMPLETE")
         self._log.info(f"  Best overall score: {best_overall_score:.4f}")
