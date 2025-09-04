@@ -905,6 +905,10 @@ class NoiseSearchInference(InferenceMethod):
                         best_overall_score = score
                         best_overall_sample = completed_sample
 
+            # Print top score for this round
+            round_top_score = max(round_scores)
+            self._log.info(f"  Round {round_idx + 1} top score: {round_top_score:.4f}")
+
             # Select top-k samples for next round (if not the last round)
             if round_idx < num_rounds - 1:
                 round_scores_tensor = torch.tensor(round_scores)
@@ -1253,6 +1257,10 @@ class NoiseSearchInference(InferenceMethod):
                         if score > best_overall_score:
                             best_overall_score = score
                             best_overall_sample = completed_sample
+
+            # Print top score for this round
+            round_top_score = max(round_scores)
+            self._log.info(f"  Round {round_idx + 1} top score: {round_top_score:.4f}")
 
             # Select top-k samples for next round (if not the last round)
             if round_idx < num_rounds - 1:
