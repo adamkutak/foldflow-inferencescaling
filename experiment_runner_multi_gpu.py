@@ -376,7 +376,10 @@ class MultiGPUExperimentRunner:
             )
 
         # 3. Noise search (divergence free max) with different branch counts
+        # Skip num_branches=1 since it's inefficient (falls back to standard inference)
         for n_branches in self.args.branch_counts:
+            if n_branches == 1:
+                continue
             experiments.append(
                 {
                     "method": "noise_search_divfree_max",
@@ -394,7 +397,10 @@ class MultiGPUExperimentRunner:
             )
 
         # 4. Noise search (sde) with different branch counts
+        # Skip num_branches=1 since it's inefficient (falls back to standard inference)
         for n_branches in self.args.branch_counts:
+            if n_branches == 1:
+                continue
             experiments.append(
                 {
                     "method": "noise_search_sde",
@@ -410,7 +416,10 @@ class MultiGPUExperimentRunner:
             )
 
         # 5. Random search + noise search (divergence free max) with different branch counts
+        # Skip num_branches=1 since the noise search phase would be inefficient
         for n_branches in self.args.branch_counts:
+            if n_branches == 1:
+                continue
             experiments.append(
                 {
                     "method": "random_search_noise",
