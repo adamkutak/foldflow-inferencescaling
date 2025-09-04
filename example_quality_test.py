@@ -109,9 +109,9 @@ def run_quality_comparison():
         ("SDE Low Noise", "sde_simple", 0.2),
         ("SDE Medium Noise", "sde_simple", 0.5),
         ("SDE High Noise", "sde_simple", 1.0),
-        ("DivFree Low", "divergence_free_simple", 0.2),
-        ("DivFree Medium", "divergence_free_simple", 0.5),
-        ("DivFree High", "divergence_free_simple", 1.0),
+        ("DivFree Low", "divfree_max_simple", 0.2),
+        ("DivFree Medium", "divfree_max_simple", 0.5),
+        ("DivFree High", "divfree_max_simple", 1.0),
     ]
 
     results = []
