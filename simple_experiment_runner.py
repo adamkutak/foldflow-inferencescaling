@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Multi-GPU experiment runner for comparing inference scaling methods in protein design.
+Simple methods validation experiment runner.
 
-This script runs experiments concurrently on multiple GPUs to compare different inference methods:
-- Standard inference method (baseline)
-- Random search/best-of-N sampling
-- Noise search (divergence free max)
-- Noise search (sde)
-- Random search + noise search (divergence free max)
+This script runs focused experiments to validate the simple inference methods:
+- Standard sampling (baseline)
+- SDE simple sampling (with noise injection)
+- DivFree Max simple sampling (with divergence-free max noise)
 
-Each method is tested with different computational budgets (number of branches)
-to evaluate inference time scaling performance.
+The goal is to ensure that noise injection methods do not reduce overall quality
+compared to standard sampling while potentially providing other benefits.
 """
 
 import argparse
@@ -46,8 +44,8 @@ except RuntimeError:
 from omegaconf import DictConfig, OmegaConf
 
 
-class MultiGPUExperimentRunner:
-    """Multi-GPU runner for inference scaling experiments."""
+class SimpleMethodsRunner:
+    """Multi-GPU runner for simple inference methods validation experiments."""
 
     def __init__(self, args):
         self.args = args
@@ -100,9 +98,7 @@ class MultiGPUExperimentRunner:
         )
 
         # Override with experiment parameters
-        self.base_conf.inference.samples.samples_per_length = (
-            1  # We'll control this manually
-        )
+        self.base_conf.inference.samples.samples_per_length = 1
         self.base_conf.inference.samples.min_length = self.args.sample_length
         self.base_conf.inference.samples.max_length = self.args.sample_length
         self.base_conf.inference.samples.length_step = 1
@@ -110,7 +106,7 @@ class MultiGPUExperimentRunner:
         # Create output directory for experiments
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.experiment_dir = os.path.join(
-            "experiments", f"inference_scaling_multi_gpu_{timestamp}"
+            "experiments", f"simple_methods_validation_multi_gpu_{timestamp}"
         )
         os.makedirs(self.experiment_dir, exist_ok=True)
 
@@ -153,9 +149,8 @@ class MultiGPUExperimentRunner:
 
         # Set output directory for this experiment
         method_name = method_config["method"]
-        branches = method_config.get("config", {}).get("num_branches", 1)
         conf.inference.output_dir = os.path.join(
-            self.experiment_dir, f"{method_name}_branches_{branches}_gpu_{gpu_id}"
+            self.experiment_dir, f"{method_name}_gpu_{gpu_id}"
         )
 
         return Sampler(conf)
@@ -259,14 +254,11 @@ class MultiGPUExperimentRunner:
 
         method_name = method_config["method"]
         config = method_config.get("config", {})
-        branches = config.get("num_branches", 1)
 
         # Setup logging for this worker (if not already set up above)
         if not "worker_logger" in locals():
             worker_logger = logging.getLogger(f"{__name__}.worker.{gpu_id}")
-        worker_logger.info(
-            f"Running experiment: {method_name} with {branches} branches on GPU {gpu_id}"
-        )
+        worker_logger.info(f"Running experiment: {method_name} on GPU {gpu_id}")
 
         # Create sampler
         sampler = self.create_sampler(method_config, gpu_id)
@@ -274,7 +266,9 @@ class MultiGPUExperimentRunner:
         try:
             # Track timing and results
             start_time = time.time()
-            scores = []
+            tm_scores = []
+            rmsd_scores = []
+            sc_times = []  # Track self-consistency evaluation times
 
             for sample_idx in range(self.args.num_samples):
                 worker_logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
@@ -287,65 +281,106 @@ class MultiGPUExperimentRunner:
                     )
                     sample_time = time.time() - sample_start
 
-                    # Extract sample and score
-                    if isinstance(sample_result, dict) and "sample" in sample_result:
-                        sample_output = sample_result["sample"]
-                        # Use the score from the method if available
-                        if "score" in sample_result:
-                            score = sample_result["score"]
-                        else:
-                            # Evaluate manually
-                            score_fn = sampler.inference_method.get_score_function(
-                                self.args.scoring_function
-                            )
-                            score = score_fn(sample_output, self.args.sample_length)
-                    else:
-                        sample_output = sample_result
-                        # Evaluate manually
-                        score_fn = sampler.inference_method.get_score_function(
-                            self.args.scoring_function
-                        )
-                        score = score_fn(sample_output, self.args.sample_length)
+                    # Extract sample
+                    sample_output = sample_result
 
-                    scores.append(score)
+                    # Calculate self-consistency scores (TM-score and RMSD)
+                    sc_start = time.time()
+                    dual_scores = sampler.inference_method._dual_score_function(
+                        sample_output, self.args.sample_length
+                    )
+                    sc_time = time.time() - sc_start
+
+                    tm_score = dual_scores["tm_score"]
+                    rmsd_score = dual_scores["rmsd"]
+
+                    tm_scores.append(tm_score)
+                    rmsd_scores.append(rmsd_score)
+                    sc_times.append(sc_time)
+
                     worker_logger.info(
-                        f"    Score: {score:.4f}, Time: {sample_time:.2f}s"
+                        f"    TM-Score: {tm_score:.4f}, RMSD: {rmsd_score:.4f}, "
+                        f"Sample Time: {sample_time:.2f}s, SC Time: {sc_time:.2f}s"
                     )
 
                 except Exception as e:
                     worker_logger.error(f"Error in sample {sample_idx}: {e}")
-                    scores.append(float("nan"))
+                    tm_scores.append(float("nan"))
+                    rmsd_scores.append(float("nan"))
+                    sc_times.append(float("nan"))
 
             total_time = time.time() - start_time
 
-            # Calculate statistics
-            valid_scores = [s for s in scores if not np.isnan(s)]
-            if valid_scores:
-                mean_score = np.mean(valid_scores)
-                std_score = np.std(valid_scores)
-                max_score = np.max(valid_scores)
-                min_score = np.min(valid_scores)
+            # Calculate statistics for TM-scores
+            valid_tm_scores = [s for s in tm_scores if not np.isnan(s)]
+            if valid_tm_scores:
+                mean_tm_score = np.mean(valid_tm_scores)
+                std_tm_score = np.std(valid_tm_scores)
+                max_tm_score = np.max(valid_tm_scores)
+                min_tm_score = np.min(valid_tm_scores)
+                median_tm_score = np.median(valid_tm_scores)
             else:
-                mean_score = std_score = max_score = min_score = float("nan")
+                mean_tm_score = std_tm_score = max_tm_score = min_tm_score = (
+                    median_tm_score
+                ) = float("nan")
+
+            # Calculate statistics for RMSD scores
+            valid_rmsd_scores = [s for s in rmsd_scores if not np.isnan(s)]
+            if valid_rmsd_scores:
+                mean_rmsd_score = np.mean(valid_rmsd_scores)
+                std_rmsd_score = np.std(valid_rmsd_scores)
+                max_rmsd_score = np.max(valid_rmsd_scores)
+                min_rmsd_score = np.min(valid_rmsd_scores)
+                median_rmsd_score = np.median(valid_rmsd_scores)
+
+                # Calculate designability metrics (percentage of samples below RMSD thresholds)
+                designability_2 = np.mean(np.array(valid_rmsd_scores) < 2.0) * 100
+                designability_1_5 = np.mean(np.array(valid_rmsd_scores) < 1.5) * 100
+                designability_1 = np.mean(np.array(valid_rmsd_scores) < 1.0) * 100
+            else:
+                mean_rmsd_score = std_rmsd_score = max_rmsd_score = min_rmsd_score = (
+                    median_rmsd_score
+                ) = float("nan")
+                designability_2 = designability_1_5 = designability_1 = float("nan")
+
+            # Calculate timing statistics
+            valid_sc_times = [t for t in sc_times if not np.isnan(t)]
+            mean_sc_time = np.mean(valid_sc_times) if valid_sc_times else float("nan")
 
             result = {
                 "method": method_name,
-                "num_branches": branches,
                 "config": config,
-                "num_samples": len(valid_scores),
-                "mean_score": mean_score,
-                "std_score": std_score,
-                "max_score": max_score,
-                "min_score": min_score,
+                "num_samples": len(valid_tm_scores),
+                "sample_length": self.args.sample_length,
+                # TM-score metrics
+                "mean_tm_score": mean_tm_score,
+                "std_tm_score": std_tm_score,
+                "max_tm_score": max_tm_score,
+                "min_tm_score": min_tm_score,
+                "median_tm_score": median_tm_score,
+                "tm_scores": tm_scores,
+                # RMSD metrics
+                "mean_rmsd_score": mean_rmsd_score,
+                "std_rmsd_score": std_rmsd_score,
+                "max_rmsd_score": max_rmsd_score,
+                "min_rmsd_score": min_rmsd_score,
+                "median_rmsd_score": median_rmsd_score,
+                "rmsd_scores": rmsd_scores,
+                # Designability metrics
+                "designability_2": designability_2,
+                "designability_1_5": designability_1_5,
+                "designability_1": designability_1,
+                # Timing
                 "total_time": total_time,
                 "time_per_sample": total_time / self.args.num_samples,
-                "scores": scores,
-                "scoring_function": self.args.scoring_function,
+                "mean_sc_time": mean_sc_time,
                 "gpu_id": gpu_id,
             }
 
             worker_logger.info(
-                f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
+                f"  Results: TM={mean_tm_score:.4f}±{std_tm_score:.4f}, "
+                f"RMSD={mean_rmsd_score:.4f}±{std_rmsd_score:.4f}, "
+                f"Time={total_time:.2f}s"
             )
 
             # Put result in queue
@@ -356,103 +391,36 @@ class MultiGPUExperimentRunner:
             # Cleanup sampler
             self.cleanup_sampler(sampler, method_name)
 
-    def run_all_experiments(self):
-        """Run all experiments with different methods and branch counts using multiple GPUs."""
+    def run_validation_experiments(self):
+        """Run validation experiments for simple methods using multiple GPUs."""
         experiments = []
 
-        # 1. Standard inference method
+        # 1. Standard sampling (baseline)
         experiments.append({"method": "standard", "config": {}})
 
-        # 2. Random search/best-of-N with different branch counts
-        for n_branches in self.args.branch_counts:
-            experiments.append(
-                {
-                    "method": "best_of_n",
-                    "config": {
-                        "num_branches": n_branches,
-                        "selector": self.args.scoring_function,
-                    },
-                }
-            )
-
-        # 3. Noise search (divergence free max) with different branch counts
-        # Skip num_branches=1 since it's inefficient (falls back to standard inference)
-        for n_branches in self.args.branch_counts:
-            if n_branches == 1:
-                continue
-            experiments.append(
-                {
-                    "method": "noise_search_divfree_max",
-                    "config": {
-                        "num_branches": n_branches,
-                        "num_keep": 1,
-                        "num_rounds": self.args.num_rounds,
-                        "lambda_div": self.args.lambda_div,
-                        "particle_repulsion_factor": self.args.particle_repulsion_factor,
-                        "noise_schedule_end_factor": self.args.noise_schedule_end_factor,
-                        "selector": self.args.scoring_function,
-                        "massage_steps": self.args.massage_steps,
-                    },
-                }
-            )
-
-        # 4. Noise search (sde) with different branch counts
-        # Skip num_branches=1 since it's inefficient (falls back to standard inference)
-        for n_branches in self.args.branch_counts:
-            if n_branches == 1:
-                continue
-            experiments.append(
-                {
-                    "method": "noise_search_sde",
-                    "config": {
-                        "num_branches": n_branches,
-                        "num_keep": 1,
-                        "num_rounds": self.args.num_rounds,
-                        "noise_scale": self.args.noise_scale,
-                        "selector": self.args.scoring_function,
-                        "massage_steps": self.args.massage_steps,
-                    },
-                }
-            )
-
-        # 5. Random search + noise search (divergence free max) with different branch counts
-        # Skip num_branches=1 since the noise search phase would be inefficient
-        for n_branches in self.args.branch_counts:
-            if n_branches == 1:
-                continue
-            experiments.append(
-                {
-                    "method": "random_search_noise",
-                    "config": {
-                        "num_branches": n_branches,
-                        "num_keep": 1,
-                        "num_rounds": self.args.num_rounds,
-                        "noise_type": "divfree_max",
-                        "lambda_div": self.args.lambda_div,
-                        "particle_repulsion_factor": self.args.particle_repulsion_factor,
-                        "noise_schedule_end_factor": self.args.noise_schedule_end_factor,
-                        "selector": self.args.scoring_function,
-                        "massage_steps": self.args.massage_steps,
-                    },
-                }
-            )
-
-        # Sort experiments to prioritize higher branch counts (longer experiments) first
-        # Keep baseline (standard) first, then sort others by branch count descending
-        baseline_experiments = [
-            exp for exp in experiments if exp["method"] == "standard"
-        ]
-        branched_experiments = [
-            exp for exp in experiments if exp["method"] != "standard"
-        ]
-
-        # Sort branched experiments by num_branches in descending order (highest first)
-        branched_experiments.sort(
-            key=lambda x: x.get("config", {}).get("num_branches", 0), reverse=True
+        # 2. SDE Simple sampling
+        experiments.append(
+            {
+                "method": "sde_simple",
+                "config": {
+                    "noise_scale": self.args.sde_noise_scale,
+                    "massage_steps": self.args.massage_steps,
+                },
+            }
         )
 
-        # Combine: baseline first, then sorted branched experiments
-        experiments = baseline_experiments + branched_experiments
+        # 3. DivFree Max Simple sampling
+        experiments.append(
+            {
+                "method": "divfree_max_simple",
+                "config": {
+                    "lambda_div": self.args.lambda_div,
+                    "particle_repulsion_factor": self.args.particle_repulsion_factor,
+                    "noise_schedule_end_factor": self.args.noise_schedule_end_factor,
+                    "massage_steps": self.args.massage_steps,
+                },
+            }
+        )
 
         # Create a manager for shared result queue
         manager = Manager()
@@ -536,15 +504,28 @@ class MultiGPUExperimentRunner:
             summary_data.append(
                 {
                     "method": result["method"],
-                    "num_branches": result["num_branches"],
-                    "mean_score": result["mean_score"],
-                    "std_score": result["std_score"],
-                    "max_score": result["max_score"],
-                    "min_score": result["min_score"],
+                    "num_samples": result["num_samples"],
+                    "sample_length": result["sample_length"],
+                    # TM-score metrics
+                    "mean_tm_score": result["mean_tm_score"],
+                    "std_tm_score": result["std_tm_score"],
+                    "max_tm_score": result["max_tm_score"],
+                    "min_tm_score": result["min_tm_score"],
+                    "median_tm_score": result["median_tm_score"],
+                    # RMSD metrics
+                    "mean_rmsd_score": result["mean_rmsd_score"],
+                    "std_rmsd_score": result["std_rmsd_score"],
+                    "max_rmsd_score": result["max_rmsd_score"],
+                    "min_rmsd_score": result["min_rmsd_score"],
+                    "median_rmsd_score": result["median_rmsd_score"],
+                    # Designability metrics
+                    "designability_2": result["designability_2"],
+                    "designability_1_5": result["designability_1_5"],
+                    "designability_1": result["designability_1"],
+                    # Timing
                     "total_time": result["total_time"],
                     "time_per_sample": result["time_per_sample"],
-                    "num_samples": result["num_samples"],
-                    "scoring_function": result["scoring_function"],
+                    "mean_sc_time": result["mean_sc_time"],
                     "gpu_id": result["gpu_id"],
                 }
             )
@@ -556,9 +537,9 @@ class MultiGPUExperimentRunner:
         self.logger.info(f"Results saved to {self.experiment_dir}")
 
     def analyze_results(self):
-        """Analyze and print experiment results."""
+        """Analyze and print validation results."""
         print("\n" + "=" * 80)
-        print("MULTI-GPU INFERENCE SCALING EXPERIMENT RESULTS")
+        print("SIMPLE METHODS VALIDATION RESULTS")
         print("=" * 80)
 
         # Find baseline (standard method)
@@ -569,195 +550,216 @@ class MultiGPUExperimentRunner:
                 break
 
         if baseline is None:
-            print("Warning: No baseline (standard) method found!")
+            print("Error: No baseline (standard) method found!")
             return
 
-        baseline_score = baseline["mean_score"]
+        baseline_tm_score = baseline["mean_tm_score"]
+        baseline_rmsd_score = baseline["mean_rmsd_score"]
         baseline_time = baseline["time_per_sample"]
 
-        print(f"Baseline (Standard): {baseline_score:.4f}±{baseline['std_score']:.4f}")
-        print(f"Scoring Function: {self.args.scoring_function}")
-        print(f"Sample Length: {self.args.sample_length}")
-        print(f"Samples per Method: {self.args.num_samples}")
-        print(f"GPUs Used: {self.available_gpus}")
+        print(f"Experimental Setup:")
+        print(f"  Sample Length: {self.args.sample_length}")
+        print(f"  Samples per Method: {self.args.num_samples}")
+        print(f"  GPUs Used: {self.available_gpus}")
+        print(f"  SDE Noise Scale: {self.args.sde_noise_scale}")
+        print(f"  DivFree Lambda: {self.args.lambda_div}")
+        print(f"  Particle Repulsion Factor: {self.args.particle_repulsion_factor}")
+        print(f"  Noise Schedule End Factor: {self.args.noise_schedule_end_factor}")
         print()
 
-        # Group results by method
-        methods = {}
+        print(f"Baseline (Standard Sampling):")
+        print(f"  TM-Score: {baseline_tm_score:.4f}±{baseline['std_tm_score']:.4f}")
+        print(f"  RMSD: {baseline_rmsd_score:.4f}±{baseline['std_rmsd_score']:.4f}")
+        print(
+            f"  Designability: <2Å={baseline['designability_2']:.1f}%, "
+            f"<1.5Å={baseline['designability_1_5']:.1f}%, <1Å={baseline['designability_1']:.1f}%"
+        )
+        print(f"  Time per sample: {baseline_time:.2f}s")
+        print()
+
+        # Print detailed comparison table
+        print(f"METHOD COMPARISON:")
+        print(
+            f"{'Method':<20} {'TM-Score':<13} {'TM-Diff':<10} {'RMSD':<10} {'RMSD-Diff':<12} {'<2Å%':<8} {'<1.5Å%':<8} {'<1Å%':<8} {'Time(s)':<8} {'GPU':<5}"
+        )
+        print("-" * 105)
+
         for result in self.results:
             method = result["method"]
-            if method not in methods:
-                methods[method] = []
-            methods[method].append(result)
+            tm_score = result["mean_tm_score"]
+            rmsd_score = result["mean_rmsd_score"]
 
-        # Print results for each method
-        for method_name, method_results in methods.items():
-            if method_name == "standard":
+            # Calculate differences from baseline
+            tm_diff = (
+                tm_score - baseline_tm_score if not np.isnan(tm_score) else float("nan")
+            )
+            rmsd_diff = (
+                rmsd_score - baseline_rmsd_score
+                if not np.isnan(rmsd_score)
+                else float("nan")
+            )
+
+            time_per_sample = result["time_per_sample"]
+            designability_2 = result["designability_2"]
+            designability_1_5 = result["designability_1_5"]
+            designability_1 = result["designability_1"]
+            gpu_id = result["gpu_id"]
+
+            print(
+                f"{method:<20} {tm_score:<13.4f} {tm_diff:<+10.4f} {rmsd_score:<10.4f} {rmsd_diff:<+12.4f} "
+                f"{designability_2:<8.1f} {designability_1_5:<8.1f} {designability_1:<8.1f} {time_per_sample:<8.2f} {gpu_id:<5}"
+            )
+
+        print()
+
+        # Quality preservation analysis
+        print("QUALITY PRESERVATION ANALYSIS:")
+        print("-" * 50)
+
+        for result in self.results:
+            if result["method"] == "standard":
                 continue
 
-            print(f"{method_name.upper()}:")
+            method = result["method"]
+            tm_score = result["mean_tm_score"]
+            rmsd_score = result["mean_rmsd_score"]
+
+            # Statistical significance tests would be ideal here, but for now use practical thresholds
+            tm_diff = tm_score - baseline_tm_score
+            rmsd_diff = rmsd_score - baseline_rmsd_score
+
+            # Define acceptable quality thresholds (method should not degrade quality significantly)
+            tm_threshold = -0.02  # Allow up to 2% decrease in TM-score
+            rmsd_threshold = 0.2  # Allow up to 0.2Å increase in RMSD
+
+            tm_preserved = tm_diff >= tm_threshold
+            rmsd_preserved = rmsd_diff <= rmsd_threshold
+
+            print(f"{method}:")
             print(
-                f"{'Branches':<10} {'Mean Score':<12} {'Improvement':<12} {'Time (s)':<10} {'Speedup':<10} {'GPU':<5}"
+                f"  TM-Score: {tm_score:.4f} vs {baseline_tm_score:.4f} (Δ={tm_diff:+.4f}) - {'✓ PRESERVED' if tm_preserved else '✗ DEGRADED'}"
             )
-            print("-" * 65)
+            print(
+                f"  RMSD: {rmsd_score:.4f} vs {baseline_rmsd_score:.4f} (Δ={rmsd_diff:+.4f}) - {'✓ PRESERVED' if rmsd_preserved else '✗ DEGRADED'}"
+            )
 
-            for result in sorted(method_results, key=lambda x: x["num_branches"]):
-                branches = result["num_branches"]
-                mean_score = result["mean_score"]
-                improvement = (
-                    ((mean_score - baseline_score) / baseline_score * 100)
-                    if not np.isnan(mean_score)
-                    else float("nan")
-                )
-                time_per_sample = result["time_per_sample"]
-                speedup = (
-                    baseline_time / time_per_sample
-                    if time_per_sample > 0
-                    else float("inf")
-                )
-                gpu_id = result["gpu_id"]
-
-                print(
-                    f"{branches:<10} {mean_score:<12.4f} {improvement:<12.2f}% {time_per_sample:<10.2f} {speedup:<10.2f}x {gpu_id:<5}"
-                )
+            overall_quality = (
+                "✓ QUALITY PRESERVED"
+                if (tm_preserved and rmsd_preserved)
+                else "✗ QUALITY DEGRADED"
+            )
+            print(f"  Overall: {overall_quality}")
             print()
 
-        # Find best overall result
-        best_result = max(
-            self.results,
-            key=lambda x: (
-                x["mean_score"] if not np.isnan(x["mean_score"]) else float("-inf")
-            ),
-        )
-        improvement = (
-            (best_result["mean_score"] - baseline_score) / baseline_score * 100
-        )
+        # Summary recommendations
+        print("SUMMARY & RECOMMENDATIONS:")
+        print("-" * 30)
 
-        print(f"BEST RESULT:")
-        print(
-            f"Method: {best_result['method']} (branches: {best_result['num_branches']})"
-        )
-        print(f"Score: {best_result['mean_score']:.4f}±{best_result['std_score']:.4f}")
-        print(f"Improvement: {improvement:.2f}% over baseline")
-        print(f"Time per sample: {best_result['time_per_sample']:.2f}s")
-        print(f"GPU: {best_result['gpu_id']}")
+        quality_methods = []
+        for result in self.results:
+            if result["method"] == "standard":
+                continue
+
+            method = result["method"]
+            tm_diff = result["mean_tm_score"] - baseline_tm_score
+            rmsd_diff = result["mean_rmsd_score"] - baseline_rmsd_score
+
+            if tm_diff >= -0.02 and rmsd_diff <= 0.2:
+                quality_methods.append(method)
+
+        if quality_methods:
+            print(f"✓ Methods that preserve quality: {', '.join(quality_methods)}")
+            print("  These methods can be safely used without quality degradation.")
+        else:
+            print("✗ No methods fully preserve baseline quality.")
+            print("  Consider parameter tuning or method refinement.")
+
         print()
+        print("Note: Quality preservation thresholds:")
+        print("  TM-Score: degradation < 0.02")
+        print("  RMSD: increase < 0.2Å")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run multi-GPU inference scaling experiments"
-    )
+    parser = argparse.ArgumentParser(description="Validate simple inference methods")
 
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=64,
-        help="Number of samples to generate per method",
+        default=32,
+        help="Number of samples to generate per method (default: 32)",
     )
 
     parser.add_argument(
         "--sample_length",
         type=int,
         default=100,
-        help="Length of protein samples to generate",
+        help="Length of protein samples to generate (default: 100)",
     )
 
     parser.add_argument(
-        "--scoring_function",
-        type=str,
-        default="tm_score",
-        choices=["tm_score", "rmsd", "geometric", "tm_score_4seq", "dual_score"],
-        help="Scoring function to use for evaluation",
-    )
-
-    parser.add_argument(
-        "--noise_scale",
+        "--sde_noise_scale",
         type=float,
         default=0.2,
-        help="Noise scale for SDE path exploration",
+        help="Noise scale for SDE simple method (default: 0.05)",
     )
 
     parser.add_argument(
         "--lambda_div",
         type=float,
         default=0.2,
-        help="Lambda for divergence-free vector fields",
-    )
-
-    parser.add_argument(
-        "--num_rounds",
-        type=int,
-        default=9,
-        help="Number of rounds for noise search methods",
+        help="Lambda for divergence-free max method (default: 0.2)",
     )
 
     parser.add_argument(
         "--particle_repulsion_factor",
         type=float,
         default=0,
-        help="Particle repulsion factor for divergence-free max methods",
+        help="Particle repulsion factor for DivFree Max (default: 0.02)",
     )
 
     parser.add_argument(
         "--noise_schedule_end_factor",
         type=float,
         default=0.7,
-        help="Noise schedule end factor for divergence-free max methods",
+        help="Noise schedule end factor for DivFree Max (default: 0.7)",
     )
 
     parser.add_argument(
         "--massage_steps",
         type=int,
         default=0,
-        help="Number of massage steps for sample cleanup",
+        help="Number of massaging steps to clean up noisy samples (default: 3, 0 to disable)",
     )
 
     parser.add_argument(
         "--gpu_ids",
         type=int,
         nargs="+",
-        default=[0, 1, 2, 3, 4],
-        help="List of GPU IDs to use for concurrent experiments (default: [2, 3, 4, 5])",
-    )
-
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="experiments",
-        help="Base directory for experiment outputs",
-    )
-
-    parser.add_argument(
-        "--branch_counts",
-        type=int,
-        nargs="+",
-        default=[1, 2, 4, 8],
-        help="List of branch counts to use for experiments (default: [2, 4, 8])",
+        default=[1, 2, 3],
+        help="List of GPU IDs to use for concurrent experiments (default: [1, 2, 3])",
     )
 
     args = parser.parse_args()
 
-    print("Starting Multi-GPU Inference Scaling Experiments")
+    print("Simple Methods Validation Experiment")
+    print("=" * 40)
     print(f"Parameters:")
     print(f"  Samples per method: {args.num_samples}")
     print(f"  Sample length: {args.sample_length}")
-    print(f"  Scoring function: {args.scoring_function}")
-    print(f"  Noise scale (SDE): {args.noise_scale}")
-    print(f"  Lambda div: {args.lambda_div}")
-    print(f"  Num rounds: {args.num_rounds}")
+    print(f"  SDE noise scale: {args.sde_noise_scale}")
+    print(f"  DivFree lambda: {args.lambda_div}")
     print(f"  Particle repulsion factor: {args.particle_repulsion_factor}")
     print(f"  Noise schedule end factor: {args.noise_schedule_end_factor}")
     print(f"  Massage steps: {args.massage_steps}")
     print(f"  GPU IDs: {args.gpu_ids}")
-    print(f"  Branch counts: {args.branch_counts}")
     print()
 
     # Create and run experiments
-    runner = MultiGPUExperimentRunner(args)
-    runner.run_all_experiments()
+    runner = SimpleMethodsRunner(args)
+    runner.run_validation_experiments()
 
-    print("Experiments completed!")
+    print("Validation experiments completed!")
 
 
 if __name__ == "__main__":

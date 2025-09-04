@@ -13,7 +13,7 @@ flow_matcher:
 
 inference:
   name: null
-  gpu_id: 1  # CUDA GPU to use
+  gpu_id: 4  # CUDA GPU to use
   seed: 123
   full_ckpt_dir: ./ckpt/baseline/
 
@@ -30,7 +30,7 @@ inference:
     # Number of steps.
     num_t: 50
     # Analogous to sampling temperature.
-    noise_scale: 0.1
+    noise_scale: 1.0
     # Final t.
     min_t: 0.01
 
@@ -47,19 +47,50 @@ inference:
     # in range(min_length, max_length, length_step)
     length_step: 50
     
+
+    # list of methods:
+    # "standard": StandardInference,
+    # "best_of_n": BestOfNInference,
+    # "noise_search_sde": NoiseSearchSDEInference,
+    # "noise_search_divfree": NoiseSearchDivFreeInference,
+    # "noise_search_divfree_max": NoiseSearchDivFreeMaxInference,
+    # "sde_simple": SDESimpleInference,
+    # "divfree_max_simple": DivFreeMaxSimpleInference,
+    # "random_search_noise": RandomSearchNoiseInference,
+
     # Inference method configuration
-    # Options: "standard", "best_of_n", "sde_path_exploration", "divergence_free_ode"
-    inference_method: "standard"
+    inference_method: "noise_search_divfree_max"
     
     # Method-specific configuration
     method_config:
-      # Best-of-N configuration
-      num_branches: 4  # Number of samples to generate and select best from
-      selector: "tm_score"  # Scoring function: "tm_score" or "rmsd"
+      selector: "geometric"  # Scoring function
+      
+      # Sample massaging configuration (applies to all noising methods)
+      massage_steps: 0  # Number of additional inference steps to clean up noisy samples (0 to disable)
+
+      # DivFree Max Simple configuration
+      # lambda_div: 0.2  # Scale factor for divergence-free field
+      # particle_repulsion_factor: 0.02  # Repulsion strength (default 0.02 of gaussian noise)
+      # noise_schedule_end_factor: 0.7  # Linear noise decrease factor (1.0 -> 0.7 by end)
+
+      num_branches: 2  # Number of branches per round
+      num_keep: 1  # Number of top samples to keep each round
+      num_rounds: 9  # Use all 9 rounds as intended
+
+      # Noise Search SDE configuration
+      noise_scale: 0.2  # Scale of noise for SDE
+      
+      # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
+      lambda_div: 0.2
+      particle_repulsion_factor: 0
+      noise_schedule_end_factor: 0.7
+
+      # random search + noise search configuration
+      noise_type: "divfree_max"
       
       # SDE Path Exploration configuration (when using sde_path_exploration)
       # num_branches: 4  # Number of branches per step
-      # num_keep: 2  # Number of branches to keep
+      # num_keep: 1  # Number of branches to keep
       # noise_scale: 0.05  # Scale of noise for SDE
       # branch_start_time: 0.0  # When to start branching (0.0 to 1.0)
       
