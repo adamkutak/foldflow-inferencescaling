@@ -719,8 +719,25 @@ class StandardInference(InferenceMethod):
 
         result = self.sampler._base_sample(sample_length, context)
 
-        self._log.info(f"STANDARD INFERENCE COMPLETE")
-        return result
+        # Optionally evaluate with selector for logging
+        selector = self.config.get("selector", None)
+        if selector:
+            self._log.info(f"Evaluating sample with selector: {selector}")
+            try:
+                score_fn = self.get_score_function(selector)
+                score = score_fn(result, sample_length)
+                self._log.info(f"STANDARD INFERENCE SCORE: {score:.4f}")
+
+                # Return result with score for consistency with other methods
+                self._log.info(f"STANDARD INFERENCE COMPLETE")
+                return {"sample": result, "score": score, "method": "standard"}
+            except Exception as e:
+                self._log.warning(f"Failed to evaluate sample with {selector}: {e}")
+                self._log.info(f"STANDARD INFERENCE COMPLETE")
+                return result
+        else:
+            self._log.info(f"STANDARD INFERENCE COMPLETE")
+            return result
 
 
 class BestOfNInference(InferenceMethod):
