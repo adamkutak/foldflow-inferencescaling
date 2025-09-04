@@ -125,7 +125,7 @@ def run_quality_comparison():
             sampler = Sampler(conf)
 
             # Generate sample
-            sample_result = sampler.inference_method.sample(20)
+            sample_result = sampler.inference_method.sample(100)
 
             # Extract final structure
             final_structure = sample_result["prot_traj"][-1]
