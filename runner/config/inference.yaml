@@ -13,7 +13,7 @@ flow_matcher:
 
 inference:
   name: null
-  gpu_id: 4  # CUDA GPU to use
+  gpu_id: 5  # CUDA GPU to use
   seed: 123
   full_ckpt_dir: ./ckpt/baseline/
 
@@ -63,7 +63,7 @@ inference:
     
     # Method-specific configuration
     method_config:
-      selector: "geometric"  # Scoring function
+      selector: "tm_score_4seq"  # Scoring function
       
       # Sample massaging configuration (applies to all noising methods)
       massage_steps: 0  # Number of additional inference steps to clean up noisy samples (0 to disable)
