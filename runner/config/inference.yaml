@@ -30,7 +30,7 @@ inference:
     # Number of steps.
     num_t: 50
     # Analogous to sampling temperature.
-    noise_scale: 0.1
+    noise_scale: 1.0
     # Final t.
     min_t: 0.01
 
