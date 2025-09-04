@@ -122,27 +122,300 @@ class InferenceMethod(ABC):
         return massaged_feats
 
     def get_score_function(self, selector: str = "tm_score") -> Callable:
-        """Get the scoring function based on selector."""
-        if selector == "tm_score":
-            return self._tm_score_function
+        """Get the scoring function based on selector.
+
+        All selectors now use the universal scorer for consistency with eval_fn pipeline.
+        """
+        if selector == "geometric":
+            return lambda sample_output, sample_length: self._universal_score_function(
+                sample_output, sample_length, "geometric"
+            )
+        elif selector == "tm_score":
+            return lambda sample_output, sample_length: self._universal_score_function(
+                sample_output, sample_length, "self_consistency"
+            )
         elif selector == "rmsd":
-            return self._rmsd_function
-        elif selector == "geometric":
-            return self._geometric_score_function
+            return lambda sample_output, sample_length: self._universal_score_function(
+                sample_output, sample_length, "self_consistency"
+            )
         elif selector == "tm_score_4seq":
-            return self._tm_score_4seq_function
+            return lambda sample_output, sample_length: self._universal_score_function(
+                sample_output, sample_length, "self_consistency_4seq"
+            )
+        elif selector == "all":
+            return self._universal_score_all_function
         elif selector == "dual_score":
-            return self._dual_score_function
+            return self._dual_score_function  # Keep legacy function for compatibility
         else:
             raise ValueError(f"Unknown selector: {selector}")
 
-    def get_score_functions(self) -> Dict[str, Callable]:
-        """Get all scoring functions for comprehensive evaluation."""
+    def _universal_score_function(
+        self, sample_output: Dict[str, Any], sample_length: int, selector="geometric"
+    ) -> float:
+        """
+        Universal scoring function that uses the exact same pipeline as eval_fn.
+
+        This function acts as a selector that runs only the specific scoring method requested,
+        just like the other individual scoring functions (geometric, tm_score, etc.).
+
+        Args:
+            sample_output: Sample output from inference
+            sample_length: Length of the sample
+            selector: Single metric to calculate and return as score:
+                - "geometric": Fast geometric validation (returns composite score)
+                - "self_consistency": ProteinMPNN + ESMFold TM-score
+                - "tm_score": TM-score (requires ground truth - not supported yet)
+                - "rmsd": RMSD (requires ground truth - not supported yet)
+
+        Returns:
+            Single float score (higher is better for geometric and tm_score)
+        """
+        self._log.debug(f"Universal scorer: Computing {selector} metric")
+
+        # Create temporary directory for evaluation
+        temp_dir = os.path.join(self.sampler._output_dir, "temp_universal_eval")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        try:
+            # Save trajectory using the same method as other scorers
+            traj_paths = self.sampler.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=temp_dir,
+            )
+            pdb_path = traj_paths["sample_path"]
+
+            # Extract final coordinates (FIXED: use [0] not [-1])
+            final_coords = sample_output["prot_traj"][
+                0
+            ]  # Final structure after flipping
+            flow_mask = np.ones(sample_length)  # All residues are "flowed" in inference
+
+            # Use universal evaluation metrics (same as eval_fn pipeline)
+            metrics_dict = self._universal_evaluation_metrics(
+                pdb_path=pdb_path,
+                atom37_pos=final_coords[:sample_length],
+                flow_mask=flow_mask,
+                selectors=[selector],  # Only compute the requested metric
+            )
+
+            # Return the appropriate score based on selector
+            if selector == "geometric":
+                # Calculate composite geometric score (same as _geometric_score_function)
+                ca_ca_bond_dev = metrics_dict["ca_ca_bond_dev"]
+                ca_ca_valid_percent = metrics_dict["ca_ca_valid_percent"]
+                ca_steric_clash_percent = metrics_dict["ca_steric_clash_percent"]
+                non_coil_percent = metrics_dict["non_coil_percent"]
+
+                score = (
+                    ca_ca_valid_percent * 2.0  # Reward valid C-alpha distances (0-2)
+                    + (1.0 - ca_steric_clash_percent) * 1.5  # Penalize clashes (0-1.5)
+                    + non_coil_percent * 1.0  # Reward secondary structure (0-1)
+                    + max(0, 1.0 - ca_ca_bond_dev)
+                    * 0.5  # Penalize bond deviations (0-0.5)
+                )
+
+                self._log.debug(f"Universal scorer (geometric): {score:.4f}")
+                return score
+
+            elif selector == "self_consistency":
+                # Return self-consistency TM-score (8 sequences - default)
+                score = metrics_dict["sc_tm_score"]
+                self._log.debug(f"Universal scorer (self_consistency): {score:.4f}")
+                return score
+
+            elif selector == "self_consistency_4seq":
+                # Return self-consistency TM-score with only 4 sequences (faster)
+                # Temporarily modify seq_per_sample to 4
+                original_seq_per_sample = self.sampler._sample_conf.seq_per_sample
+                self.sampler._sample_conf.seq_per_sample = 4
+
+                try:
+                    # Re-run self-consistency with 4 sequences
+                    temp_sc_dir = os.path.join(
+                        os.path.dirname(pdb_path), "self_consistency_4seq"
+                    )
+                    os.makedirs(temp_sc_dir, exist_ok=True)
+                    shutil.copy(
+                        pdb_path, os.path.join(temp_sc_dir, os.path.basename(pdb_path))
+                    )
+
+                    sc_results_4seq = self.sampler.run_self_consistency(
+                        temp_sc_dir, pdb_path, motif_mask=None
+                    )
+                    score = sc_results_4seq["tm_score"].mean()
+
+                    # Clean up
+                    if os.path.exists(temp_sc_dir):
+                        shutil.rmtree(temp_sc_dir)
+
+                finally:
+                    # Restore original seq_per_sample
+                    self.sampler._sample_conf.seq_per_sample = original_seq_per_sample
+
+                self._log.debug(
+                    f"Universal scorer (self_consistency_4seq): {score:.4f}"
+                )
+                return score
+
+            elif selector == "tm_score":
+                # Return TM-score (requires ground truth)
+                score = metrics_dict["tm_score"]
+                self._log.debug(f"Universal scorer (tm_score): {score:.4f}")
+                return score
+
+            elif selector == "rmsd":
+                # Return negative RMSD (lower RMSD is better, so negate)
+                score = -metrics_dict["rmsd"]
+                self._log.debug(f"Universal scorer (rmsd): {score:.4f}")
+                return score
+
+            else:
+                raise ValueError(f"Unknown selector: {selector}")
+
+        except Exception as e:
+            self._log.error(f"Universal scorer failed: {e}")
+            return float("-inf")
+        finally:
+            # Clean up temporary directory
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+    def _universal_score_all_function(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> Dict[str, float]:
+        """
+        Universal scoring function that returns all available scores.
+
+        Returns:
+            Dict with all available scores: geometric, self_consistency, etc.
+        """
+        self._log.info("Universal scorer: Computing ALL metrics")
+
+        # Create temporary directory for evaluation
+        temp_dir = os.path.join(self.sampler._output_dir, "temp_universal_eval_all")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        try:
+            # Save trajectory using the same method as other scorers
+            traj_paths = self.sampler.save_traj(
+                sample_output["prot_traj"],
+                sample_output["rigid_0_traj"],
+                np.ones(sample_length),
+                output_dir=temp_dir,
+            )
+            pdb_path = traj_paths["sample_path"]
+
+            # Extract final coordinates (FIXED: use [0] not [-1])
+            final_coords = sample_output["prot_traj"][
+                0
+            ]  # Final structure after flipping
+            flow_mask = np.ones(sample_length)  # All residues are "flowed" in inference
+
+            # Use universal evaluation metrics to get all metrics at once
+            metrics_dict = self._universal_evaluation_metrics(
+                pdb_path=pdb_path,
+                atom37_pos=final_coords[:sample_length],
+                flow_mask=flow_mask,
+                selectors=["geometric", "self_consistency"],  # Get both types
+            )
+
+            # Calculate composite geometric score
+            ca_ca_bond_dev = metrics_dict["ca_ca_bond_dev"]
+            ca_ca_valid_percent = metrics_dict["ca_ca_valid_percent"]
+            ca_steric_clash_percent = metrics_dict["ca_steric_clash_percent"]
+            non_coil_percent = metrics_dict["non_coil_percent"]
+
+            geometric_score = (
+                ca_ca_valid_percent * 2.0  # Reward valid C-alpha distances (0-2)
+                + (1.0 - ca_steric_clash_percent) * 1.5  # Penalize clashes (0-1.5)
+                + non_coil_percent * 1.0  # Reward secondary structure (0-1)
+                + max(0, 1.0 - ca_ca_bond_dev) * 0.5  # Penalize bond deviations (0-0.5)
+            )
+
+            # Also get 4-sequence self-consistency for comparison
+            original_seq_per_sample = self.sampler._sample_conf.seq_per_sample
+            self.sampler._sample_conf.seq_per_sample = 4
+
+            try:
+                temp_sc_dir = os.path.join(temp_dir, "self_consistency_4seq")
+                os.makedirs(temp_sc_dir, exist_ok=True)
+                shutil.copy(
+                    pdb_path, os.path.join(temp_sc_dir, os.path.basename(pdb_path))
+                )
+
+                sc_results_4seq = self.sampler.run_self_consistency(
+                    temp_sc_dir, pdb_path, motif_mask=None
+                )
+                sc_tm_score_4seq = sc_results_4seq["tm_score"].mean()
+                sc_rmsd_4seq = sc_results_4seq["rmsd"].mean()
+
+            finally:
+                self.sampler._sample_conf.seq_per_sample = original_seq_per_sample
+
+            # Return comprehensive results
+            all_scores = {
+                "geometric": geometric_score,
+                "tm_score": metrics_dict["sc_tm_score"],  # 8-sequence self-consistency
+                "rmsd": -metrics_dict["sc_rmsd"],  # Negative because lower is better
+                "tm_score_4seq": sc_tm_score_4seq,  # 4-sequence self-consistency
+                "rmsd_4seq": -sc_rmsd_4seq,  # Negative because lower is better
+                # Individual geometric components
+                "ca_ca_bond_dev": ca_ca_bond_dev,
+                "ca_ca_valid_percent": ca_ca_valid_percent,
+                "ca_steric_clash_percent": ca_steric_clash_percent,
+                "non_coil_percent": non_coil_percent,
+                "radius_of_gyration": metrics_dict["radius_of_gyration"],
+            }
+
+            self._log.info("Universal scorer (ALL) results:")
+            for key, value in all_scores.items():
+                self._log.info(f"  {key}: {value:.4f}")
+
+            return all_scores
+
+        except Exception as e:
+            self._log.error(f"Universal scorer (ALL) failed: {e}")
+            return {"error": float("-inf")}
+        finally:
+            # Clean up temporary directory
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+
+    def evaluate_sample_comprehensive(
+        self, sample_output: Dict[str, Any], sample_length: int
+    ) -> Dict[str, float]:
+        """
+        Comprehensive evaluation using the universal scorer with multiple metrics.
+
+        This provides the same evaluation as eval_fn for complete consistency.
+        Returns a dict with both geometric and self-consistency scores.
+        """
+        # Get both geometric and self-consistency scores
+        geometric_score = self._universal_score_function(
+            sample_output, sample_length, "geometric"
+        )
+        sc_score = self._universal_score_function(
+            sample_output, sample_length, "self_consistency"
+        )
+
         return {
-            "tm_score": self._tm_score_function,
-            "rmsd": self._rmsd_function,
-            "geometric": self._geometric_score_function,
-            "tm_score_4seq": self._tm_score_4seq_function,
+            "geometric_score": geometric_score,
+            "self_consistency_score": sc_score,
+        }
+
+    def get_score_functions(self) -> Dict[str, Callable]:
+        """Get all scoring functions for comprehensive evaluation.
+
+        All functions now use the universal scorer for consistency with eval_fn pipeline.
+        """
+        return {
+            "geometric": self.get_score_function("geometric"),
+            "tm_score": self.get_score_function("tm_score"),
+            "rmsd": self.get_score_function("rmsd"),
+            "tm_score_4seq": self.get_score_function("tm_score_4seq"),
+            "all": self.get_score_function("all"),
         }
 
     def _calculate_and_log_self_consistency(
@@ -325,69 +598,76 @@ class InferenceMethod(ABC):
             )
             self._log.info(f"  Distances > 5.0 Å: {np.sum(ca_dists > 5.0)}")
 
-            # Calculate geometric metrics
-            ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
-            num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
-                ca_pos
-            )
+            # Use universal evaluation metrics for consistency with eval_fn
+            flow_mask = np.ones(sample_length)  # All residues are "flowed" in inference
 
-            # Calculate radius of gyration
-            center = np.mean(ca_pos, axis=0)
-            distances_from_center = np.linalg.norm(ca_pos - center, axis=1)
-            rg_manual = np.sqrt(np.mean(distances_from_center**2))
-
-            self._log.info(f"QUALITY METRICS:")
-            self._log.info(f"  CA bond deviation: {ca_ca_bond_dev:.4f} Å")
-            self._log.info(f"  Valid bonds: {ca_ca_valid_percent*100:.1f}%")
-            self._log.info(f"  Steric clashes: {ca_steric_clash_percent*100:.2f}%")
-            self._log.info(f"  Number of clashes: {num_ca_steric_clashes}")
-            self._log.info(f"  Radius of gyration: {rg_manual:.2f} Å")
-            self._log.info(
-                f"  Max distance from center: {distances_from_center.max():.2f} Å"
-            )
-
-            # Quality interpretation
-            self._log.info("QUALITY INTERPRETATION:")
-            if ca_ca_bond_dev < 0.5:
-                self._log.info("  ✓ CA bond deviation looks reasonable")
-            else:
-                self._log.info(
-                    "  ✗ CA bond deviation is very high - structure may be malformed"
-                )
-
-            if ca_ca_valid_percent > 0.8:
-                self._log.info("  ✓ Most CA bonds are within expected range")
-            else:
-                self._log.info("  ✗ Many CA bonds are outside expected range")
-
-            if ca_steric_clash_percent < 0.05:
-                self._log.info("  ✓ Clash rate is acceptable")
-            else:
-                self._log.info(
-                    "  ✗ High clash rate - structure may have packing issues"
-                )
-
-            # Check if structure is completely broken
-            if ca_ca_valid_percent == 0.0:
-                self._log.error(
-                    "  ❌ CRITICAL: 0% valid bonds - structure generation failed!"
-                )
-            elif ca_ca_bond_dev > 10.0:
-                self._log.error(
-                    "  ❌ CRITICAL: Extremely high bond deviation - model not working!"
-                )
-
-            # Secondary structure analysis
             try:
-                ss_metrics = metrics.calc_mdtraj_metrics(pdb_path)
-                non_coil_percent = ss_metrics["non_coil_percent"]
-                rg = ss_metrics["radius_of_gyration"]
+                sample_metrics = self._universal_evaluation_metrics(
+                    pdb_path=pdb_path,
+                    atom37_pos=final_coords[
+                        :sample_length
+                    ],  # Use correct final coordinates
+                    flow_mask=flow_mask,
+                    selectors=["geometric"],  # Only geometric metrics for speed
+                )
+
+                # Extract metrics (same names as protein_metrics)
+                ca_ca_bond_dev = sample_metrics["ca_ca_bond_dev"]
+                ca_ca_valid_percent = sample_metrics["ca_ca_valid_percent"]
+                ca_steric_clash_percent = sample_metrics["ca_steric_clash_percent"]
+                num_ca_steric_clashes = sample_metrics["num_ca_steric_clashes"]
+                non_coil_percent = sample_metrics["non_coil_percent"]
+                rg = sample_metrics["radius_of_gyration"]
+
+                self._log.info(
+                    f"QUALITY METRICS (using universal scorer - same as eval_fn):"
+                )
+                self._log.info(f"  CA bond deviation: {ca_ca_bond_dev:.4f} Å")
+                self._log.info(f"  Valid bonds: {ca_ca_valid_percent*100:.1f}%")
+                self._log.info(f"  Steric clashes: {ca_steric_clash_percent*100:.2f}%")
+                self._log.info(f"  Number of clashes: {num_ca_steric_clashes}")
+                self._log.info(f"  Radius of gyration: {rg:.2f} Å")
+
+                # Quality interpretation
+                self._log.info("QUALITY INTERPRETATION:")
+                if ca_ca_bond_dev < 0.5:
+                    self._log.info("  ✓ CA bond deviation looks reasonable")
+                else:
+                    self._log.info(
+                        "  ✗ CA bond deviation is very high - structure may be malformed"
+                    )
+
+                if ca_ca_valid_percent > 0.8:
+                    self._log.info("  ✓ Most CA bonds are within expected range")
+                else:
+                    self._log.info("  ✗ Many CA bonds are outside expected range")
+
+                if ca_steric_clash_percent < 0.05:
+                    self._log.info("  ✓ Clash rate is acceptable")
+                else:
+                    self._log.info(
+                        "  ✗ High clash rate - structure may have packing issues"
+                    )
+
+                # Check if structure is completely broken
+                if ca_ca_valid_percent == 0.0:
+                    self._log.error(
+                        "  ❌ CRITICAL: 0% valid bonds - structure generation failed!"
+                    )
+                elif ca_ca_bond_dev > 10.0:
+                    self._log.error(
+                        "  ❌ CRITICAL: Extremely high bond deviation - model not working!"
+                    )
+
             except Exception as e:
-                self._log.warning(
-                    f"        _geometric_score_function: Secondary structure analysis failed: {e}"
+                self._log.error(f"Universal evaluation failed: {e}")
+                # Fallback to direct calculation
+                ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
+                num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
+                    ca_pos
                 )
                 non_coil_percent = 0.0
-                rg = np.linalg.norm(ca_pos.std(axis=0))  # Fallback RG calculation
+                rg = np.linalg.norm(ca_pos.std(axis=0))
 
             # Composite score calculation (higher is better)
             # Penalize bad geometry, reward good secondary structure
@@ -424,6 +704,163 @@ class InferenceMethod(ABC):
                     os.unlink(pdb_path)
                 except:
                     pass
+
+    def _universal_evaluation_metrics(
+        self,
+        *,
+        pdb_path,
+        atom37_pos,
+        flow_mask,
+        selectors,
+        gt_atom37_pos=None,
+        gt_aatype=None,
+    ):
+        """
+        Universal evaluation function that follows the EXACT same methodology as
+        eval_fn and protein_metrics to ensure complete consistency.
+
+        CRITICAL DESIGN PRINCIPLE:
+        This function replicates the exact coordinate processing pipeline from
+        training evaluation (eval_fn -> protein_metrics) to ensure that inference
+        methods produce identical evaluation results to training.
+
+        KEY FEATURES:
+        1. Uses same coordinate extraction (prot_traj[0] after flipping)
+        2. Applies identical masking and processing steps
+        3. Uses same metric calculation functions
+        4. Supports selective metric calculation for efficiency
+        5. Includes self-consistency evaluation (ProteinMPNN + ESMFold)
+
+        SUPPORTED SELECTORS:
+        - "geometric": Fast geometric validation (CA bonds, clashes, secondary structure)
+        - "tm_score": TM-score comparison with ground truth (requires gt_atom37_pos, gt_aatype)
+        - "rmsd": RMSD comparison with ground truth (requires gt_atom37_pos, gt_aatype)
+        - "self_consistency": ProteinMPNN + ESMFold self-consistency evaluation
+        - "all": All available metrics
+
+        Args:
+            pdb_path: Path to PDB file for secondary structure analysis
+            atom37_pos: [N, 37, 3] atom positions from inference (already extracted with [0])
+            flow_mask: [N] mask of which residues are flowed
+            selectors: List of metrics to calculate
+            gt_atom37_pos: [N, 37, 3] ground truth positions (required for tm_score/rmsd)
+            gt_aatype: [N] ground truth amino acid types (required for tm_score)
+
+        Returns:
+            Dict with requested metrics (same structure as protein_metrics)
+        """
+        from tools.analysis import metrics
+        from tools.analysis import utils as au
+        from openfold.np.relax import amber_minimize
+        from foldflow.data import utils as du
+        import tree
+
+        # Ensure selectors is a list
+        if isinstance(selectors, str):
+            selectors = [selectors]
+
+        metrics_dict = {}
+
+        # Always calculate basic masks (needed for all selectors)
+        atom37_mask = np.any(atom37_pos, axis=-1)
+        atom37_diffuse_mask = flow_mask[..., None] * atom37_mask
+        bb_mask = np.any(atom37_mask, axis=-1)
+
+        # Geometric metrics (needed for "geometric" and "all")
+        if any(sel in ["geometric", "all"] for sel in selectors):
+            # Secondary structure analysis (same as protein_metrics)
+            mdtraj_metrics = metrics.calc_mdtraj_metrics(pdb_path)
+
+            # Create protein for violation metrics (same as protein_metrics)
+            prot = au.create_full_prot(atom37_pos, atom37_diffuse_mask)
+            violation_metrics = amber_minimize.get_violation_metrics(prot)
+            struct_violations = violation_metrics["structural_violations"]
+            inter_violations = struct_violations["between_residues"]
+
+            # CA geometry calculations (same as protein_metrics)
+            ca_pos = atom37_pos[..., metrics.CA_IDX, :][bb_mask.astype(bool)]
+            ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
+            num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
+                ca_pos
+            )
+
+            # Add geometric metrics
+            metrics_dict.update(
+                {
+                    "ca_ca_bond_dev": ca_ca_bond_dev,
+                    "ca_ca_valid_percent": ca_ca_valid_percent,
+                    "ca_steric_clash_percent": ca_steric_clash_percent,
+                    "num_ca_steric_clashes": num_ca_steric_clashes,
+                    **mdtraj_metrics,
+                }
+            )
+
+            # Add inter-violation metrics (same as protein_metrics)
+            for k in metrics.INTER_VIOLATION_METRICS:
+                metrics_dict[k] = inter_violations[k]
+
+        # TM score and RMSD metrics (needed for "tm_score", "rmsd", or "all")
+        if any(sel in ["tm_score", "rmsd", "all"] for sel in selectors):
+            if gt_atom37_pos is None or gt_aatype is None:
+                raise ValueError(
+                    f"gt_atom37_pos and gt_aatype required for selectors {selectors}"
+                )
+
+            # Extract positions for comparison (same as protein_metrics)
+            bb_diffuse_mask = (flow_mask * bb_mask).astype(bool)
+            unpad_gt_scaffold_pos = gt_atom37_pos[..., metrics.CA_IDX, :][
+                bb_diffuse_mask
+            ]
+            unpad_pred_scaffold_pos = atom37_pos[..., metrics.CA_IDX, :][
+                bb_diffuse_mask
+            ]
+            seq = du.aatype_to_seq(gt_aatype[bb_diffuse_mask])
+
+            if any(sel in ["tm_score", "all"] for sel in selectors):
+                _, tm_score = metrics.calc_tm_score(
+                    unpad_pred_scaffold_pos, unpad_gt_scaffold_pos, seq, seq
+                )
+                metrics_dict["tm_score"] = tm_score
+
+            if any(sel in ["rmsd", "all"] for sel in selectors):
+                rmsd = metrics.calc_aligned_rmsd(
+                    unpad_pred_scaffold_pos, unpad_gt_scaffold_pos
+                )
+                metrics_dict["rmsd"] = rmsd
+
+        # Self-consistency evaluation (ProteinMPNN + ESMFold pipeline)
+        if any(sel in ["self_consistency", "all"] for sel in selectors):
+            try:
+                # Create temporary directory for self-consistency evaluation
+                temp_sc_dir = os.path.join(
+                    os.path.dirname(pdb_path), "self_consistency"
+                )
+                os.makedirs(temp_sc_dir, exist_ok=True)
+                shutil.copy(
+                    pdb_path, os.path.join(temp_sc_dir, os.path.basename(pdb_path))
+                )
+
+                # Run self-consistency evaluation (same as other scoring functions)
+                sc_results = self.sampler.run_self_consistency(
+                    temp_sc_dir, pdb_path, motif_mask=None
+                )
+
+                metrics_dict["sc_tm_score"] = sc_results["tm_score"].mean()
+                metrics_dict["sc_rmsd"] = sc_results["rmsd"].mean()
+
+                # Clean up
+                if os.path.exists(temp_sc_dir):
+                    shutil.rmtree(temp_sc_dir)
+
+            except Exception as e:
+                self._log.warning(f"Self-consistency evaluation failed: {e}")
+                metrics_dict["sc_tm_score"] = 0.0
+                metrics_dict["sc_rmsd"] = float("inf")
+
+        # Apply same tree mapping as protein_metrics
+        metrics_dict = tree.map_structure(lambda x: np.mean(x).item(), metrics_dict)
+
+        return metrics_dict
 
     def _tm_score_4seq_function(
         self, sample_output: Dict[str, Any], sample_length: int
