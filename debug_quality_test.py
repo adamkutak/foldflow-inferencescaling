@@ -203,7 +203,7 @@ def main():
 
         # Generate sample
         print("Generating sample...")
-        sample_result = sampler.inference_method.sample(20)
+        sample_result = sampler.inference_method.sample(100)
 
         print("Sample generation complete!")
         print(f"Sample result keys: {list(sample_result.keys())}")
