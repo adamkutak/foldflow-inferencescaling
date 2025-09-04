@@ -59,7 +59,7 @@ inference:
     # "random_search_noise": RandomSearchNoiseInference,
 
     # Inference method configuration
-    inference_method: "best_of_n"
+    inference_method: "noise_search_sde"
     
     # Method-specific configuration
     method_config:
@@ -78,7 +78,7 @@ inference:
       num_rounds: 9  # Use all 9 rounds as intended
 
       # Noise Search SDE configuration
-      noise_scale: 0.05  # Scale of noise for SDE
+      noise_scale: 0.2  # Scale of noise for SDE
       
       # DivFree Max Noise Search configuration (when using noise_search_divfree_max)
       lambda_div: 0.2
