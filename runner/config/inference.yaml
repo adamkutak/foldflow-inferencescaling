@@ -59,7 +59,7 @@ inference:
     # "random_search_noise": RandomSearchNoiseInference,
 
     # Inference method configuration
-    inference_method: "noise_search_sde"
+    inference_method: "noise_search_divfree_max"
     
     # Method-specific configuration
     method_config:
