@@ -56,7 +56,7 @@ def create_sampler_config():
     conf.inference.samples.inference_method = "best_of_n"
     conf.inference.samples.method_config = {
         "n_samples": 3,  # Generate 3 samples
-        "selector": "geometric_score",  # Use geometric scorer
+        "selector": "geometric",  # Use geometric scorer
     }
 
     return conf
