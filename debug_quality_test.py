@@ -41,8 +41,8 @@ def create_sampler_config():
 
     # Set sampling parameters
     conf.inference.samples.samples_per_length = 1
-    conf.inference.samples.min_length = 20
-    conf.inference.samples.max_length = 20
+    conf.inference.samples.min_length = 100
+    conf.inference.samples.max_length = 100
     conf.inference.samples.length_step = 1
     conf.inference.output_dir = "debug_output"
     conf.inference.samples.inference_method = "standard"
