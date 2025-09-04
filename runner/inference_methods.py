@@ -285,7 +285,7 @@ class InferenceMethod(ABC):
             pdb_path = traj_paths["sample_path"]
 
             # Extract backbone coordinates for geometric analysis
-            final_coords = sample_output["prot_traj"][-1]  # Final structure
+            final_coords = sample_output["prot_traj"][0]  # Final structure
             ca_pos = final_coords[:sample_length, 1, :]  # C-alpha coordinates
 
             # DETAILED QUALITY DIAGNOSTICS
