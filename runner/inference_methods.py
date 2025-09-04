@@ -260,22 +260,24 @@ class InferenceMethod(ABC):
     ) -> float:
         """Evaluate sample using fast geometric validation metrics only.
 
-        This scorer analyzes the generated backbone structure directly without
-        any sequence design or refolding steps, making it very fast.
+        PRINCIPLED APPROACH: Use the exact same coordinate processing pipeline
+        as the training evaluation (eval_fn) to ensure consistency.
 
         Returns a composite score where higher values indicate better geometry.
         """
         from tools.analysis import metrics
         import tempfile
 
-        self._log.debug(f"        _geometric_score_function: Starting fast evaluation")
+        self._log.debug(
+            f"        _geometric_score_function: Starting evaluation (same as training)"
+        )
 
         try:
             # Create temporary file for PDB
             with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False) as tmp_pdb:
                 tmp_pdb_path = tmp_pdb.name
 
-            # Save the backbone structure to PDB
+            # Save the backbone structure to PDB (same as training eval)
             traj_paths = self.sampler.save_traj(
                 sample_output["prot_traj"],
                 sample_output["rigid_0_traj"],
@@ -284,27 +286,55 @@ class InferenceMethod(ABC):
             )
             pdb_path = traj_paths["sample_path"]
 
-            # Extract backbone coordinates for geometric analysis
-            final_coords = sample_output["prot_traj"][-1]  # Final structure
-            ca_pos = final_coords[:sample_length, 1, :]  # C-alpha coordinates
+            # PRINCIPLED FIX: Use the exact same approach as training evaluation
+            # Extract final coordinates (same as eval_fn: final_prot = infer_out["prot_traj"][0])
+            final_coords = sample_output["prot_traj"][-1]  # Final structure [N, 37, 3]
 
-            # Calculate geometric metrics
-            ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
-            num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
-                ca_pos
+            # Debug coordinate values before processing
+            ca_pos_raw = final_coords[:sample_length, 1, :]  # C-alpha coordinates
+            self._log.info(
+                f"_geometric_score_function: Raw CA coordinate range: [{ca_pos_raw.min():.3f}, {ca_pos_raw.max():.3f}]"
             )
 
-            # Secondary structure analysis
+            # Create dummy ground truth (not used for geometric metrics, only for TM score)
+            dummy_gt_coords = np.zeros_like(final_coords[:sample_length])
+            dummy_gt_aatype = np.zeros(sample_length, dtype=np.int32)
+            flow_mask = np.ones(sample_length)  # All residues are "flowed"
+
+            # Use our streamlined geometric_metrics_only function (same pipeline, no TM score)
             try:
-                ss_metrics = metrics.calc_mdtraj_metrics(pdb_path)
-                non_coil_percent = ss_metrics["non_coil_percent"]
-                rg = ss_metrics["radius_of_gyration"]
+                sample_metrics = self._geometric_metrics_only(
+                    pdb_path=pdb_path,
+                    atom37_pos=final_coords[
+                        :sample_length
+                    ],  # Raw inference coordinates
+                    flow_mask=flow_mask,
+                )
+
+                # Extract the geometric metrics we care about
+                ca_ca_bond_dev = sample_metrics["ca_ca_bond_dev"]
+                ca_ca_valid_percent = sample_metrics["ca_ca_valid_percent"]
+                ca_steric_clash_percent = sample_metrics["ca_steric_clash_percent"]
+                num_ca_steric_clashes = sample_metrics["num_ca_steric_clashes"]
+                non_coil_percent = sample_metrics["non_coil_percent"]
+                rg = sample_metrics["radius_of_gyration"]
+
+                self._log.info(
+                    f"_geometric_score_function: Using geometric_metrics_only (same pipeline as training, no TM score)"
+                )
+
             except Exception as e:
-                self._log.warning(
-                    f"        _geometric_score_function: Secondary structure analysis failed: {e}"
+                self._log.error(
+                    f"_geometric_score_function: geometric_metrics_only failed: {e}"
+                )
+                # Fallback to direct calculation
+                ca_pos = final_coords[:sample_length, 1, :]
+                ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
+                num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
+                    ca_pos
                 )
                 non_coil_percent = 0.0
-                rg = np.linalg.norm(ca_pos.std(axis=0))  # Fallback RG calculation
+                rg = np.linalg.norm(ca_pos.std(axis=0))
 
             # Composite score calculation (higher is better)
             # Penalize bad geometry, reward good secondary structure
@@ -315,15 +345,26 @@ class InferenceMethod(ABC):
                 + max(0, 1.0 - ca_ca_bond_dev) * 0.5  # Penalize bond deviations (0-0.5)
             )
 
-            self._log.debug(
-                f"        _geometric_score_function: Geometric score = {score:.4f}"
+            self._log.info(
+                f"_geometric_score_function: Analyzing generated structure (same as training eval)"
             )
-            self._log.debug(
-                f"          ca_valid_percent={ca_ca_valid_percent:.3f}, clash_percent={ca_steric_clash_percent:.3f}"
+            self._log.info(f"_geometric_score_function: Geometric score = {score:.4f}")
+            self._log.info(
+                f"  ca_valid_percent={ca_ca_valid_percent:.3f}, clash_percent={ca_steric_clash_percent:.3f}"
             )
-            self._log.debug(
-                f"          non_coil_percent={non_coil_percent:.3f}, bond_dev={ca_ca_bond_dev:.3f}"
+            self._log.info(
+                f"  non_coil_percent={non_coil_percent:.3f}, bond_dev={ca_ca_bond_dev:.3f}"
             )
+            self._log.info(f"  num_ca_clashes={num_ca_steric_clashes}, rg={rg:.3f}")
+
+            if ca_ca_valid_percent < 0.8:
+                self._log.warning(
+                    f"_geometric_score_function: Poor C-alpha bond geometry! Only {ca_ca_valid_percent:.1%} valid bonds"
+                )
+            if ca_steric_clash_percent > 0.1:
+                self._log.warning(
+                    f"_geometric_score_function: High clash rate! {ca_steric_clash_percent:.1%} of atom pairs clash"
+                )
 
             return score
 
@@ -341,6 +382,63 @@ class InferenceMethod(ABC):
                     os.unlink(pdb_path)
                 except:
                     pass
+
+    def _geometric_metrics_only(self, *, pdb_path, atom37_pos, flow_mask):
+        """
+        Streamlined version of protein_metrics that only calculates geometric metrics.
+
+        This follows the exact same pipeline as metrics.protein_metrics but skips
+        the expensive TM score calculation, making it much faster for geometric scoring.
+
+        Args:
+            pdb_path: Path to PDB file for secondary structure analysis
+            atom37_pos: [N, 37, 3] atom positions from inference
+            flow_mask: [N] mask of which residues are flowed
+
+        Returns:
+            Dict with geometric metrics (same keys as protein_metrics)
+        """
+        from tools.analysis import metrics
+        from tools.analysis import utils as au
+        from openfold.np.relax import amber_minimize
+        import tree
+
+        # Secondary structure analysis (same as protein_metrics)
+        mdtraj_metrics = metrics.calc_mdtraj_metrics(pdb_path)
+
+        # Atom mask and diffuse mask (same as protein_metrics)
+        atom37_mask = np.any(atom37_pos, axis=-1)
+        atom37_diffuse_mask = flow_mask[..., None] * atom37_mask
+
+        # Create protein for violation metrics (same as protein_metrics)
+        prot = au.create_full_prot(atom37_pos, atom37_diffuse_mask)
+        violation_metrics = amber_minimize.get_violation_metrics(prot)
+        struct_violations = violation_metrics["structural_violations"]
+        inter_violations = struct_violations["between_residues"]
+
+        # Geometry calculations (same as protein_metrics)
+        bb_mask = np.any(atom37_mask, axis=-1)
+        ca_pos = atom37_pos[..., metrics.CA_IDX, :][bb_mask.astype(bool)]
+        ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
+        num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(ca_pos)
+
+        # Build metrics dict (same structure as protein_metrics, minus TM score)
+        metrics_dict = {
+            "ca_ca_bond_dev": ca_ca_bond_dev,
+            "ca_ca_valid_percent": ca_ca_valid_percent,
+            "ca_steric_clash_percent": ca_steric_clash_percent,
+            "num_ca_steric_clashes": num_ca_steric_clashes,
+            **mdtraj_metrics,
+        }
+
+        # Add inter-violation metrics (same as protein_metrics)
+        for k in metrics.INTER_VIOLATION_METRICS:
+            metrics_dict[k] = inter_violations[k]
+
+        # Apply same tree mapping as protein_metrics
+        metrics_dict = tree.map_structure(lambda x: np.mean(x).item(), metrics_dict)
+
+        return metrics_dict
 
     def _tm_score_4seq_function(
         self, sample_output: Dict[str, Any], sample_length: int
@@ -416,19 +514,35 @@ class InferenceMethod(ABC):
             )
 
             pdb_path = traj_paths["sample_path"]
+            self._log.info(
+                f"_dual_score_function: Generated structure saved to {pdb_path}"
+            )
+
             sc_output_dir = os.path.join(temp_dir, "self_consistency")
             os.makedirs(sc_output_dir, exist_ok=True)
             shutil.copy(
                 pdb_path, os.path.join(sc_output_dir, os.path.basename(pdb_path))
             )
 
+            self._log.info(
+                f"_dual_score_function: Running self-consistency evaluation (ProteinMPNN + ESMFold)"
+            )
             sc_results = self.sampler.run_self_consistency(
                 sc_output_dir, pdb_path, motif_mask=None
             )
 
+            mean_tm = sc_results["tm_score"].mean()
+            mean_rmsd = sc_results["rmsd"].mean()
+            self._log.info(
+                f"_dual_score_function: TM Score = {mean_tm:.4f}, RMSD = {mean_rmsd:.4f}"
+            )
+            self._log.info(
+                f"_dual_score_function: This compares GENERATED structure vs ESMFold-refolded structure"
+            )
+
             return {
-                "tm_score": sc_results["tm_score"].mean(),
-                "rmsd": sc_results["rmsd"].mean(),
+                "tm_score": mean_tm,
+                "rmsd": mean_rmsd,
             }
 
         finally:
