@@ -565,6 +565,54 @@ class InferenceMethod(ABC):
 
         return result
 
+    def generate_initial_features(self, sample_length):
+        """Generate random initial features."""
+        # Initialize features
+        res_mask = np.ones(sample_length)
+        fixed_mask = np.zeros_like(res_mask)
+        aatype = torch.zeros(sample_length, dtype=torch.int32)
+        chain_idx = torch.zeros_like(aatype)
+
+        ref_sample = self.sampler.flow_matcher.sample_ref(
+            n_samples=sample_length,
+            as_tensor_7=True,
+        )
+        res_idx = torch.arange(1, sample_length + 1)
+
+        init_feats = {
+            "res_mask": res_mask,
+            "seq_idx": res_idx,
+            "fixed_mask": fixed_mask,
+            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
+            "sc_ca_t": np.zeros((sample_length, 3)),
+            "aatype": aatype,
+            "chain_idx": chain_idx,
+            **ref_sample,
+        }
+
+        # Add batch dimension and move to GPU
+        init_feats = tree.map_structure(
+            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
+        )
+        init_feats = tree.map_structure(
+            lambda x: x[None].to(self.sampler.device), init_feats
+        )
+
+        return init_feats
+
+    def _sample_from_init_feats(self, init_feats, context):
+        """Sample to completion starting from specific initial features."""
+        # Use the sampler's inference function directly with the provided initial features
+        sample_out = self.sampler.exp.inference_fn(
+            init_feats,
+            num_t=self.sampler._fm_conf.num_t,
+            min_t=self.sampler._fm_conf.min_t,
+            aux_traj=True,
+            noise_scale=self.sampler._fm_conf.noise_scale,
+            context=context,
+        )
+        return tree.map_structure(lambda x: x[:, 0], sample_out)
+
 
 class StandardInference(InferenceMethod):
     """Standard inference method - single sample generation."""
@@ -619,7 +667,12 @@ class BestOfNInference(InferenceMethod):
 
         for i in range(num_branches):
             self._log.info(f"Generating sample {i+1}/{num_branches}")
-            sample_output = self.sampler._base_sample(sample_length, context)
+
+            # Generate initial features (same as RandomSearchNoiseInference)
+            init_feats = self.generate_initial_features(sample_length)
+
+            # Sample to completion using exp.inference_fn directly (same as RandomSearchNoiseInference first stage)
+            sample_output = self._sample_from_init_feats(init_feats, context)
 
             # Evaluate the sample
             score = score_fn(sample_output, sample_length)
@@ -2630,54 +2683,6 @@ class RandomSearchNoiseInference(NoiseSearchInference):
             "score": global_best_score,
             "method": f"random_search_noise_{noise_type}",
         }
-
-    def generate_initial_features(self, sample_length):
-        """Generate random initial features."""
-        # Initialize features
-        res_mask = np.ones(sample_length)
-        fixed_mask = np.zeros_like(res_mask)
-        aatype = torch.zeros(sample_length, dtype=torch.int32)
-        chain_idx = torch.zeros_like(aatype)
-
-        ref_sample = self.sampler.flow_matcher.sample_ref(
-            n_samples=sample_length,
-            as_tensor_7=True,
-        )
-        res_idx = torch.arange(1, sample_length + 1)
-
-        init_feats = {
-            "res_mask": res_mask,
-            "seq_idx": res_idx,
-            "fixed_mask": fixed_mask,
-            "torsion_angles_sin_cos": np.zeros((sample_length, 7, 2)),
-            "sc_ca_t": np.zeros((sample_length, 3)),
-            "aatype": aatype,
-            "chain_idx": chain_idx,
-            **ref_sample,
-        }
-
-        # Add batch dimension and move to GPU
-        init_feats = tree.map_structure(
-            lambda x: x if torch.is_tensor(x) else torch.tensor(x), init_feats
-        )
-        init_feats = tree.map_structure(
-            lambda x: x[None].to(self.sampler.device), init_feats
-        )
-
-        return init_feats
-
-    def _sample_from_init_feats(self, init_feats, context):
-        """Sample to completion starting from specific initial features."""
-        # Use the sampler's inference function directly with the provided initial features
-        sample_out = self.sampler.exp.inference_fn(
-            init_feats,
-            num_t=self.sampler._fm_conf.num_t,
-            min_t=self.sampler._fm_conf.min_t,
-            aux_traj=True,
-            noise_scale=self.sampler._fm_conf.noise_scale,
-            context=context,
-        )
-        return tree.map_structure(lambda x: x[:, 0], sample_out)
 
     def _noise_search_sde_custom_init(
         self,
