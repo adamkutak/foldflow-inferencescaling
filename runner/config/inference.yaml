@@ -59,7 +59,7 @@ inference:
     # "random_search_noise": RandomSearchNoiseInference,
 
     # Inference method configuration
-    inference_method: "random_search_noise"
+    inference_method: "best_of_n"
     
     # Method-specific configuration
     method_config:
