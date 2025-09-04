@@ -121,20 +121,49 @@ class Sampler:
         self._log.info(f"Saving inference config to {config_path}")
 
         # Load models and experiment
+        self._log.info(f"Loading model weights from: {self._weights_path}")
         weights_pkl = du.read_pkl(
             self._weights_path, use_torch=True, map_location=self.device
         )
+        self._log.info(f"Successfully loaded checkpoint from {self._weights_path}")
+
         if conf.model.model_name == "ff1":
             self._load_ckpt_ff1(weights_pkl, conf_overrides)
         else:
+            # Print checkpoint information
+            if "esm_model" in weights_pkl:
+                self._log.info(f"Checkpoint ESM model: {weights_pkl['esm_model']}")
+            if "state_dict" in weights_pkl:
+                num_params = len(weights_pkl["state_dict"])
+                self._log.info(f"Checkpoint contains {num_params} parameter tensors")
+
             deps = FF2Dependencies(conf)
+            self._log.info(
+                f"Created FF2Dependencies with ESM model: {deps.config.model.esm2_model_key}"
+            )
             self.model = FF2Model.from_ckpt(weights_pkl, deps)
+            self._log.info("Successfully created FF2Model from checkpoint")
             self.flow_matcher = deps.flow_matcher
             self.exp = train.Experiment(conf=self._conf, model=self.model)
+
+        self._log.info(f"Moving model to device: {self.device}")
         self.model = self.model.to(self.device)
         self.model.eval()
+        self._log.info("Model set to evaluation mode")
+
+        # Count model parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(
+            p.numel() for p in self.model.parameters() if p.requires_grad
+        )
+        self._log.info(
+            f"Model has {total_params:,} total parameters ({trainable_params:,} trainable)"
+        )
+
+        self._log.info("Loading ESMFold model")
         self._folding_model = esm.pretrained.esmfold_v1().eval()
         self._folding_model = self._folding_model.to(self.device)
+        self._log.info(f"ESMFold model loaded and moved to {self.device}")
 
         # Initialize inference method
         self._setup_inference_method()
