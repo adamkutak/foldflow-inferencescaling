@@ -681,7 +681,7 @@ def main():
     parser.add_argument(
         "--lambda_div",
         type=float,
-        default=0.3,
+        default=0.2,
         help="Lambda for divergence-free vector fields",
     )
 
