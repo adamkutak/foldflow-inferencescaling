@@ -658,7 +658,7 @@ def main():
         "--scoring_function",
         type=str,
         default="tm_score",
-        choices=["tm_score", "rmsd"],
+        choices=["tm_score", "rmsd", "geometric", "tm_score_4seq", "dual_score"],
         help="Scoring function to use for evaluation",
     )
 
