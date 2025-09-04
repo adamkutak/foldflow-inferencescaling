@@ -288,11 +288,94 @@ class InferenceMethod(ABC):
             final_coords = sample_output["prot_traj"][-1]  # Final structure
             ca_pos = final_coords[:sample_length, 1, :]  # C-alpha coordinates
 
+            # DETAILED QUALITY DIAGNOSTICS
+            self._log.info("=== GEOMETRIC SCORER QUALITY DIAGNOSTICS ===")
+            self._log.info(f"Final structure shape: {final_coords.shape}")
+            self._log.info(f"CA positions shape: {ca_pos.shape}")
+            self._log.info(
+                f"CA positions min/max: {ca_pos.min():.4f} / {ca_pos.max():.4f}"
+            )
+
+            # Show first few CA positions
+            self._log.info("First 5 CA positions:")
+            for i in range(min(5, len(ca_pos))):
+                self._log.info(
+                    f"  CA {i}: [{ca_pos[i, 0]:.3f}, {ca_pos[i, 1]:.3f}, {ca_pos[i, 2]:.3f}]"
+                )
+
+            # Calculate consecutive CA-CA distances
+            ca_dists = []
+            for i in range(1, len(ca_pos)):
+                dist = np.linalg.norm(ca_pos[i] - ca_pos[i - 1])
+                ca_dists.append(dist)
+
+            ca_dists = np.array(ca_dists)
+            self._log.info(f"CA-CA distances:")
+            self._log.info(f"  Number of bonds: {len(ca_dists)}")
+            self._log.info(f"  Mean distance: {ca_dists.mean():.4f} Å")
+            self._log.info(f"  Std distance: {ca_dists.std():.4f} Å")
+            self._log.info(f"  Min distance: {ca_dists.min():.4f} Å")
+            self._log.info(f"  Max distance: {ca_dists.max():.4f} Å")
+            self._log.info(f"  Expected CA-CA distance: 3.8021 Å")
+
+            # Show distribution of distances
+            self._log.info(f"  Distances < 2.0 Å: {np.sum(ca_dists < 2.0)}")
+            self._log.info(
+                f"  Distances 2.0-5.0 Å: {np.sum((ca_dists >= 2.0) & (ca_dists <= 5.0))}"
+            )
+            self._log.info(f"  Distances > 5.0 Å: {np.sum(ca_dists > 5.0)}")
+
             # Calculate geometric metrics
             ca_ca_bond_dev, ca_ca_valid_percent = metrics.ca_ca_distance(ca_pos)
             num_ca_steric_clashes, ca_steric_clash_percent = metrics.ca_ca_clashes(
                 ca_pos
             )
+
+            # Calculate radius of gyration
+            center = np.mean(ca_pos, axis=0)
+            distances_from_center = np.linalg.norm(ca_pos - center, axis=1)
+            rg_manual = np.sqrt(np.mean(distances_from_center**2))
+
+            self._log.info(f"QUALITY METRICS:")
+            self._log.info(f"  CA bond deviation: {ca_ca_bond_dev:.4f} Å")
+            self._log.info(f"  Valid bonds: {ca_ca_valid_percent*100:.1f}%")
+            self._log.info(f"  Steric clashes: {ca_steric_clash_percent*100:.2f}%")
+            self._log.info(f"  Number of clashes: {num_ca_steric_clashes}")
+            self._log.info(f"  Radius of gyration: {rg_manual:.2f} Å")
+            self._log.info(
+                f"  Max distance from center: {distances_from_center.max():.2f} Å"
+            )
+
+            # Quality interpretation
+            self._log.info("QUALITY INTERPRETATION:")
+            if ca_ca_bond_dev < 0.5:
+                self._log.info("  ✓ CA bond deviation looks reasonable")
+            else:
+                self._log.info(
+                    "  ✗ CA bond deviation is very high - structure may be malformed"
+                )
+
+            if ca_ca_valid_percent > 0.8:
+                self._log.info("  ✓ Most CA bonds are within expected range")
+            else:
+                self._log.info("  ✗ Many CA bonds are outside expected range")
+
+            if ca_steric_clash_percent < 0.05:
+                self._log.info("  ✓ Clash rate is acceptable")
+            else:
+                self._log.info(
+                    "  ✗ High clash rate - structure may have packing issues"
+                )
+
+            # Check if structure is completely broken
+            if ca_ca_valid_percent == 0.0:
+                self._log.error(
+                    "  ❌ CRITICAL: 0% valid bonds - structure generation failed!"
+                )
+            elif ca_ca_bond_dev > 10.0:
+                self._log.error(
+                    "  ❌ CRITICAL: Extremely high bond deviation - model not working!"
+                )
 
             # Secondary structure analysis
             try:

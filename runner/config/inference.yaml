@@ -23,7 +23,6 @@ inference:
   output_dir: ./results
 
   # Path to model weights.
-  # weights_path: ./ckpt/foldflow-sfm.pth # For FoldFlow-1 with stochastic flow matcher.
   weights_path: ./models/ff2_base.pth
 
   flow:
@@ -59,11 +58,11 @@ inference:
     # "random_search_noise": RandomSearchNoiseInference,
 
     # Inference method configuration
-    inference_method: "noise_search_divfree_max"
+    inference_method: "best_of_n"
     
     # Method-specific configuration
     method_config:
-      selector: "tm_score_4seq"  # Scoring function
+      selector: "geometric"  # Scoring function
       
       # Sample massaging configuration (applies to all noising methods)
       massage_steps: 0  # Number of additional inference steps to clean up noisy samples (0 to disable)
