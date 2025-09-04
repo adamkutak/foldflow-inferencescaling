@@ -59,11 +59,11 @@ inference:
     # "random_search_noise": RandomSearchNoiseInference,
 
     # Inference method configuration
-    inference_method: "noise_search_divfree_max"
+    inference_method: "noise_search_sde"
     
     # Method-specific configuration
     method_config:
-      selector: "tm_score"  # Scoring function
+      selector: "geometric"  # Scoring function
       
       # Sample massaging configuration (applies to all noising methods)
       massage_steps: 0  # Number of additional inference steps to clean up noisy samples (0 to disable)
