@@ -879,7 +879,7 @@ def main():
     parser.add_argument(
         "--scoring_function",
         type=str,
-        default="tm_score",
+        default="geometric",
         choices=["tm_score", "rmsd", "geometric", "tm_score_4seq", "dual_score"],
         help="Scoring function to use for evaluation",
     )
