@@ -275,6 +275,7 @@ class MultiGPUExperimentRunner:
             # Track timing and results
             start_time = time.time()
             scores = []
+            sample_metrics_list = []
 
             for sample_idx in range(self.args.num_samples):
                 worker_logger.info(f"  Sample {sample_idx + 1}/{self.args.num_samples}")
@@ -307,14 +308,111 @@ class MultiGPUExperimentRunner:
                         )
                         score = score_fn(sample_output, self.args.sample_length)
 
+                    # Get comprehensive metrics for self-consistency scoring functions
+                    sample_metrics = {"selector_score": score}
+                    if self.args.scoring_function in [
+                        "tm_score",
+                        "rmsd",
+                        "tm_score_4seq",
+                    ]:
+                        try:
+                            # Get comprehensive evaluation including RMSD
+                            comprehensive_metrics = (
+                                sampler.inference_method.evaluate_sample_comprehensive(
+                                    sample_output, self.args.sample_length
+                                )
+                            )
+                            sample_metrics.update(comprehensive_metrics)
+
+                            # Also get the raw self-consistency results for detailed analysis
+                            temp_dir = os.path.join(
+                                sampler._output_dir, f"temp_sample_{sample_idx}"
+                            )
+                            os.makedirs(temp_dir, exist_ok=True)
+
+                            try:
+                                # Save sample for self-consistency evaluation
+                                traj_paths = sampler.save_traj(
+                                    sample_output["prot_traj"],
+                                    sample_output["rigid_0_traj"],
+                                    np.ones(self.args.sample_length),
+                                    output_dir=temp_dir,
+                                )
+                                pdb_path = traj_paths["sample_path"]
+
+                                # Run self-consistency to get individual sequence results
+                                sc_results = sampler.run_self_consistency(
+                                    temp_dir, pdb_path, motif_mask=None
+                                )
+
+                                # Extract detailed metrics
+                                sample_metrics["sc_tm_scores"] = sc_results[
+                                    "tm_score"
+                                ].tolist()
+                                sample_metrics["sc_rmsd_scores"] = sc_results[
+                                    "rmsd"
+                                ].tolist()
+                                sample_metrics["sc_mean_tm"] = sc_results[
+                                    "tm_score"
+                                ].mean()
+                                sample_metrics["sc_mean_rmsd"] = sc_results[
+                                    "rmsd"
+                                ].mean()
+
+                                # Calculate percentage of sequences with RMSD < thresholds
+                                rmsd_values = sc_results["rmsd"].values
+                                sample_metrics["rmsd_lt_2A_percent"] = (
+                                    rmsd_values < 2.0
+                                ).mean() * 100
+                                sample_metrics["rmsd_lt_1_5A_percent"] = (
+                                    rmsd_values < 1.5
+                                ).mean() * 100
+                                sample_metrics["rmsd_lt_1A_percent"] = (
+                                    rmsd_values < 1.0
+                                ).mean() * 100
+
+                            finally:
+                                # Clean up temporary directory
+                                if os.path.exists(temp_dir):
+                                    import shutil
+
+                                    shutil.rmtree(temp_dir)
+
+                        except Exception as e:
+                            worker_logger.warning(
+                                f"Failed to get comprehensive metrics: {e}"
+                            )
+                            # Set default values if comprehensive evaluation fails
+                            sample_metrics.update(
+                                {
+                                    "sc_mean_tm": float("nan"),
+                                    "sc_mean_rmsd": float("nan"),
+                                    "rmsd_lt_2A_percent": float("nan"),
+                                    "rmsd_lt_1_5A_percent": float("nan"),
+                                    "rmsd_lt_1A_percent": float("nan"),
+                                }
+                            )
+
                     scores.append(score)
-                    worker_logger.info(
-                        f"    Score: {score:.4f}, Time: {sample_time:.2f}s"
-                    )
+                    sample_metrics_list.append(sample_metrics)
+
+                    # Enhanced logging
+                    if "sc_mean_rmsd" in sample_metrics and not np.isnan(
+                        sample_metrics["sc_mean_rmsd"]
+                    ):
+                        worker_logger.info(
+                            f"    TM: {score:.4f}, RMSD: {sample_metrics['sc_mean_rmsd']:.3f}Å, "
+                            f"<2Å: {sample_metrics['rmsd_lt_2A_percent']:.1f}%, Time: {sample_time:.2f}s"
+                        )
+                    else:
+                        worker_logger.info(
+                            f"    Score: {score:.4f}, Time: {sample_time:.2f}s"
+                        )
 
                 except Exception as e:
                     worker_logger.error(f"Error in sample {sample_idx}: {e}")
                     scores.append(float("nan"))
+                    sample_metrics_list.append({"selector_score": float("nan")})
 
             total_time = time.time() - start_time
 
@@ -327,6 +425,56 @@ class MultiGPUExperimentRunner:
                 min_score = np.min(valid_scores)
             else:
                 mean_score = std_score = max_score = min_score = float("nan")
+
+            # Calculate comprehensive metrics if available
+            comprehensive_metrics = {}
+            if self.args.scoring_function in ["tm_score", "rmsd", "tm_score_4seq"]:
+                # Extract RMSD statistics
+                rmsd_values = [
+                    m.get("sc_mean_rmsd")
+                    for m in sample_metrics_list
+                    if not np.isnan(m.get("sc_mean_rmsd", float("nan")))
+                ]
+                if rmsd_values:
+                    comprehensive_metrics.update(
+                        {
+                            "mean_rmsd": np.mean(rmsd_values),
+                            "std_rmsd": np.std(rmsd_values),
+                            "max_rmsd": np.max(rmsd_values),
+                            "min_rmsd": np.min(rmsd_values),
+                        }
+                    )
+                else:
+                    comprehensive_metrics.update(
+                        {
+                            "mean_rmsd": float("nan"),
+                            "std_rmsd": float("nan"),
+                            "max_rmsd": float("nan"),
+                            "min_rmsd": float("nan"),
+                        }
+                    )
+
+                # Calculate percentage statistics
+                for threshold_key in [
+                    "rmsd_lt_2A_percent",
+                    "rmsd_lt_1_5A_percent",
+                    "rmsd_lt_1A_percent",
+                ]:
+                    threshold_values = [
+                        m.get(threshold_key)
+                        for m in sample_metrics_list
+                        if not np.isnan(m.get(threshold_key, float("nan")))
+                    ]
+                    if threshold_values:
+                        comprehensive_metrics[f"mean_{threshold_key}"] = np.mean(
+                            threshold_values
+                        )
+                        comprehensive_metrics[f"std_{threshold_key}"] = np.std(
+                            threshold_values
+                        )
+                    else:
+                        comprehensive_metrics[f"mean_{threshold_key}"] = float("nan")
+                        comprehensive_metrics[f"std_{threshold_key}"] = float("nan")
 
             result = {
                 "method": method_name,
@@ -342,11 +490,23 @@ class MultiGPUExperimentRunner:
                 "scores": scores,
                 "scoring_function": self.args.scoring_function,
                 "gpu_id": gpu_id,
+                "sample_metrics": sample_metrics_list,
+                **comprehensive_metrics,
             }
 
-            worker_logger.info(
-                f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
-            )
+            # Enhanced result logging
+            if "mean_rmsd" in comprehensive_metrics and not np.isnan(
+                comprehensive_metrics["mean_rmsd"]
+            ):
+                worker_logger.info(
+                    f"  Results: TM={mean_score:.4f}±{std_score:.4f}, "
+                    f"RMSD={comprehensive_metrics['mean_rmsd']:.3f}±{comprehensive_metrics['std_rmsd']:.3f}Å, "
+                    f"<2Å={comprehensive_metrics['mean_rmsd_lt_2A_percent']:.1f}%, Time={total_time:.2f}s"
+                )
+            else:
+                worker_logger.info(
+                    f"  Results: Mean={mean_score:.4f}±{std_score:.4f}, Time={total_time:.2f}s"
+                )
 
             # Put result in queue
             result_queue.put(result)
@@ -533,21 +693,41 @@ class MultiGPUExperimentRunner:
         # Save summary as CSV
         summary_data = []
         for result in self.results:
-            summary_data.append(
-                {
-                    "method": result["method"],
-                    "num_branches": result["num_branches"],
-                    "mean_score": result["mean_score"],
-                    "std_score": result["std_score"],
-                    "max_score": result["max_score"],
-                    "min_score": result["min_score"],
-                    "total_time": result["total_time"],
-                    "time_per_sample": result["time_per_sample"],
-                    "num_samples": result["num_samples"],
-                    "scoring_function": result["scoring_function"],
-                    "gpu_id": result["gpu_id"],
-                }
-            )
+            summary_row = {
+                "method": result["method"],
+                "num_branches": result["num_branches"],
+                "mean_score": result["mean_score"],
+                "std_score": result["std_score"],
+                "max_score": result["max_score"],
+                "min_score": result["min_score"],
+                "total_time": result["total_time"],
+                "time_per_sample": result["time_per_sample"],
+                "num_samples": result["num_samples"],
+                "scoring_function": result["scoring_function"],
+                "gpu_id": result["gpu_id"],
+            }
+
+            # Add comprehensive metrics if available
+            if "mean_rmsd" in result:
+                summary_row.update(
+                    {
+                        "mean_rmsd": result["mean_rmsd"],
+                        "std_rmsd": result["std_rmsd"],
+                        "max_rmsd": result["max_rmsd"],
+                        "min_rmsd": result["min_rmsd"],
+                        "mean_rmsd_lt_2A_percent": result.get(
+                            "mean_rmsd_lt_2A_percent", float("nan")
+                        ),
+                        "mean_rmsd_lt_1_5A_percent": result.get(
+                            "mean_rmsd_lt_1_5A_percent", float("nan")
+                        ),
+                        "mean_rmsd_lt_1A_percent": result.get(
+                            "mean_rmsd_lt_1A_percent", float("nan")
+                        ),
+                    }
+                )
+
+            summary_data.append(summary_row)
 
         summary_df = pd.DataFrame(summary_data)
         summary_file = os.path.join(self.experiment_dir, "summary_results.csv")
@@ -596,10 +776,20 @@ class MultiGPUExperimentRunner:
                 continue
 
             print(f"{method_name.upper()}:")
-            print(
-                f"{'Branches':<10} {'Mean Score':<12} {'Improvement':<12} {'Time (s)':<10} {'Speedup':<10} {'GPU':<5}"
-            )
-            print("-" * 65)
+
+            # Check if we have comprehensive metrics
+            has_rmsd = any("mean_rmsd" in result for result in method_results)
+
+            if has_rmsd:
+                print(
+                    f"{'Branches':<8} {'TM Score':<10} {'RMSD (Å)':<10} {'<2Å %':<8} {'<1.5Å %':<8} {'<1Å %':<8} {'Time (s)':<8} {'GPU':<4}"
+                )
+                print("-" * 80)
+            else:
+                print(
+                    f"{'Branches':<10} {'Mean Score':<12} {'Improvement':<12} {'Time (s)':<10} {'Speedup':<10} {'GPU':<5}"
+                )
+                print("-" * 65)
 
             for result in sorted(method_results, key=lambda x: x["num_branches"]):
                 branches = result["num_branches"]
@@ -617,9 +807,19 @@ class MultiGPUExperimentRunner:
                 )
                 gpu_id = result["gpu_id"]
 
-                print(
-                    f"{branches:<10} {mean_score:<12.4f} {improvement:<12.2f}% {time_per_sample:<10.2f} {speedup:<10.2f}x {gpu_id:<5}"
-                )
+                if has_rmsd and "mean_rmsd" in result:
+                    mean_rmsd = result["mean_rmsd"]
+                    rmsd_2a = result.get("mean_rmsd_lt_2A_percent", float("nan"))
+                    rmsd_1_5a = result.get("mean_rmsd_lt_1_5A_percent", float("nan"))
+                    rmsd_1a = result.get("mean_rmsd_lt_1A_percent", float("nan"))
+
+                    print(
+                        f"{branches:<8} {mean_score:<10.4f} {mean_rmsd:<10.3f} {rmsd_2a:<8.1f} {rmsd_1_5a:<8.1f} {rmsd_1a:<8.1f} {time_per_sample:<8.2f} {gpu_id:<4}"
+                    )
+                else:
+                    print(
+                        f"{branches:<10} {mean_score:<12.4f} {improvement:<12.2f}% {time_per_sample:<10.2f} {speedup:<10.2f}x {gpu_id:<5}"
+                    )
             print()
 
         # Find best overall result
@@ -637,8 +837,21 @@ class MultiGPUExperimentRunner:
         print(
             f"Method: {best_result['method']} (branches: {best_result['num_branches']})"
         )
-        print(f"Score: {best_result['mean_score']:.4f}±{best_result['std_score']:.4f}")
+        print(
+            f"TM Score: {best_result['mean_score']:.4f}±{best_result['std_score']:.4f}"
+        )
         print(f"Improvement: {improvement:.2f}% over baseline")
+
+        if "mean_rmsd" in best_result and not np.isnan(best_result["mean_rmsd"]):
+            print(
+                f"RMSD: {best_result['mean_rmsd']:.3f}±{best_result['std_rmsd']:.3f}Å"
+            )
+            print(
+                f"Designability: <2Å={best_result.get('mean_rmsd_lt_2A_percent', 0):.1f}%, "
+                f"<1.5Å={best_result.get('mean_rmsd_lt_1_5A_percent', 0):.1f}%, "
+                f"<1Å={best_result.get('mean_rmsd_lt_1A_percent', 0):.1f}%"
+            )
+
         print(f"Time per sample: {best_result['time_per_sample']:.2f}s")
         print(f"GPU: {best_result['gpu_id']}")
         print()
