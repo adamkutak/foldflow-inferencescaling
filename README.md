@@ -52,7 +52,7 @@ python experiment_runner_multi_gpu.py --num_samples 10 --sample_length 100 --gpu
 - `--num_samples`: Number of protein samples to generate per method (default: 5)
 - `--sample_length`: Length of protein backbones to generate (default: 100)
 - `--scoring_function`: Metric for optimization - `tm_score`, `rmsd`, or `geometric` (default: `tm_score`)
-- `--branch_counts`: Computational budgets to test (default: [2, 4, 8])
+- `--branch_counts`: Computational budgets to test (default: [1, 2, 4, 8])
 
 The experiment runners will compare standard sampling, best-of-N, SDE path exploration, and divergence-free ODE methods. Results are saved with detailed metrics and summary CSVs for analysis.
 
