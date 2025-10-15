@@ -715,40 +715,6 @@ class InferenceMethod(ABC):
         gt_atom37_pos=None,
         gt_aatype=None,
     ):
-        """
-        Universal evaluation function that follows the EXACT same methodology as
-        eval_fn and protein_metrics to ensure complete consistency.
-
-        CRITICAL DESIGN PRINCIPLE:
-        This function replicates the exact coordinate processing pipeline from
-        training evaluation (eval_fn -> protein_metrics) to ensure that inference
-        methods produce identical evaluation results to training.
-
-        KEY FEATURES:
-        1. Uses same coordinate extraction (prot_traj[0] after flipping)
-        2. Applies identical masking and processing steps
-        3. Uses same metric calculation functions
-        4. Supports selective metric calculation for efficiency
-        5. Includes self-consistency evaluation (ProteinMPNN + ESMFold)
-
-        SUPPORTED SELECTORS:
-        - "geometric": Fast geometric validation (CA bonds, clashes, secondary structure)
-        - "tm_score": TM-score comparison with ground truth (requires gt_atom37_pos, gt_aatype)
-        - "rmsd": RMSD comparison with ground truth (requires gt_atom37_pos, gt_aatype)
-        - "self_consistency": ProteinMPNN + ESMFold self-consistency evaluation
-        - "all": All available metrics
-
-        Args:
-            pdb_path: Path to PDB file for secondary structure analysis
-            atom37_pos: [N, 37, 3] atom positions from inference (already extracted with [0])
-            flow_mask: [N] mask of which residues are flowed
-            selectors: List of metrics to calculate
-            gt_atom37_pos: [N, 37, 3] ground truth positions (required for tm_score/rmsd)
-            gt_aatype: [N] ground truth amino acid types (required for tm_score)
-
-        Returns:
-            Dict with requested metrics (same structure as protein_metrics)
-        """
         from tools.analysis import metrics
         from tools.analysis import utils as au
         from openfold.np.relax import amber_minimize
