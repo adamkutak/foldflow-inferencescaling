@@ -2,14 +2,7 @@
 
 # FoldFlow: Inference Time Scaling for Protein Design
 
-[![Original FoldFlow](http://img.shields.io/badge/original-FoldFlow-blue)](https://github.com/DreamFold/FoldFlow)
-[![FF-1 Preprint](http://img.shields.io/badge/paper-arxiv.2310.02391-B31B1B.svg)](https://arxiv.org/abs/2310.02391)
-[![FF-2 Preprint](http://img.shields.io/badge/paper-arxiv.2405.20313-B31B1B.svg)](https://arxiv.org/abs/2405.20313)
 [![pytorch](https://img.shields.io/badge/PyTorch_1.13+-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/get-started/locally/)
-
-</div>
-
-This repository is a fork of [DreamFold/FoldFlow](https://github.com/DreamFold/FoldFlow) focused on improving protein design quality through inference time scaling methods. We implement and compare several techniques for allocating additional computational budget during inference to generate higher quality protein structures.
 
 ## Description
 
@@ -20,6 +13,9 @@ FoldFlow uses flow matching generative models for protein backbone generation. T
 - **Divergence-free ODE paths**: Deterministic exploration using divergence-free vector fields
 
 These methods allow trading computational budget for improved protein design quality in a controlled manner. Our experiment runners provide automated comparison of these approaches across different computational budgets.
+
+This repository is a fork of [DreamFold/FoldFlow](https://github.com/DreamFold/FoldFlow) focused on improving protein design quality through inference time scaling methods. We implement and compare several techniques for allocating additional computational budget during inference to generate higher quality protein structures.
+
 
 ![foldflow](media/foldflow-sfm_protein.gif)
 
