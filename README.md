@@ -12,9 +12,6 @@ FoldFlow uses flow matching generative models for protein backbone generation. T
 
 This repository is a fork of [DreamFold/FoldFlow](https://github.com/DreamFold/FoldFlow) focused on improving protein design quality through inference time scaling methods. We implement and compare several techniques for allocating additional computational budget during inference to generate higher quality protein structures.
 
-
-![foldflow](media/foldflow-sfm_protein.gif)
-
 # Installation
 
 Clone this repository and install the dependencies using micromamba. We tested the code with Python 3.9.15 and CUDA 11.6.1. First [install micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html) then run the following:
