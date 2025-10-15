@@ -6,13 +6,7 @@
 
 ## Description
 
-FoldFlow uses flow matching generative models for protein backbone generation. This fork explores methods to improve design quality by scaling inference compute, including:
-
-- **Best-of-N sampling**: Generate multiple independent samples and select the best
-- **SDE path exploration**: Stochastic branching with noise-based exploration
-- **Divergence-free ODE paths**: Deterministic exploration using divergence-free vector fields
-
-These methods allow trading computational budget for improved protein design quality in a controlled manner. Our experiment runners provide automated comparison of these approaches across different computational budgets.
+FoldFlow uses flow matching generative models for protein backbone generation. This fork explores methods to improve self-consistency distance by scaling inference compute for unconditional protein generation. We benchmark multiple methods, including Best-of-N (Random Search), and our novel noise search method paired with a unique noise schedule that aims to maximize the diversity-quality tradeoff, as well as standard SDE noise. We further include a two-stage sampling algorithm that optimizes the initial noise, then the trajectory for the best performance. These methods allow trading computational budget for improved protein design quality in a controlled manner. Our experiment runners provide automated comparison of these approaches across different computational budgets.
 
 This repository is a fork of [DreamFold/FoldFlow](https://github.com/DreamFold/FoldFlow) focused on improving protein design quality through inference time scaling methods. We implement and compare several techniques for allocating additional computational budget during inference to generate higher quality protein structures.
 
