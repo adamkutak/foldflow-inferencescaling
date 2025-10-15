@@ -4,6 +4,8 @@
 
 [![pytorch](https://img.shields.io/badge/PyTorch_1.13+-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/get-started/locally/)
 
+</div>
+
 ## Description
 
 FoldFlow uses flow matching generative models for protein backbone generation. This fork explores methods to improve self-consistency distance by scaling inference compute for unconditional protein generation. We benchmark multiple methods, including Best-of-N (Random Search), and our novel noise search method paired with a unique noise schedule that aims to maximize the diversity-quality tradeoff, as well as standard SDE noise. We further include a two-stage sampling algorithm that optimizes the initial noise, then the trajectory for the best performance. These methods allow trading computational budget for improved protein design quality in a controlled manner. Our experiment runners provide automated comparison of these approaches across different computational budgets.
